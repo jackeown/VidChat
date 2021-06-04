@@ -1,0 +1,44 @@
+html, body{
+    margin:0px;
+    padding:0px;
+    background:black;
+    color:white;
+}
+
+
+#chat, #videos, #messages, #message, .videoDiv{
+    border: 1px solid white;
+    padding: 1em;
+    margin: 1em;
+}
+
+#chatInput {
+    width: 100%;
+    height: 1em;
+    padding: 1em;
+}
+
+#videos {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-evenly;
+}
+
+.videoDiv {
+    display: flex;
+    flex-direction: column;
+    width: calc(350px * 1.333);
+    height: 350px;
+    resize: both;
+    overflow: hidden;
+}
+
+.video{
+    width: 100%;
+    height: 90%;
+}
+
+.flipVideo {
+    transform: rotateY(180deg);
+}
