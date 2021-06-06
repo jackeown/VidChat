@@ -3,7 +3,7 @@ let myId = null;
 window.peers = [];
 let hostname = window.location.hostname || "localhost";
 let ws = new WebSocket(`wss://${hostname}:6503`, "json");
-
+window.camOn = 0;
 window.zip = function (...args) {
     let result = [];
 
@@ -15,13 +15,17 @@ window.zip = function (...args) {
     return result;
 }
 
+window.logz = function(l){
+    console.log(`${Date.now()}   ${l}`)
+}
+
 ws.onmessage = function (e) {
     let msg = JSON.parse(e.data);
 
     switch (msg.type) {
         case "id":
             myId = msg.id;
-            console.log(`Received id: ${myId}`)
+            logz(`Received id: ${myId}`)
             break;
 
         case "userlist":  // Received an updated user list
@@ -66,7 +70,7 @@ export function getPeerById(id) {
 
 export function sendToServer(msg) {
     var msgJSON = JSON.stringify(msg);
-    // console.log("Sending '" + msg.type + "' message: " + msgJSON);
+    // logz("Sending '" + msg.type + "' message: " + msgJSON);
     ws.send(msgJSON);
 }
 
@@ -88,7 +92,7 @@ function sendTracksToPeers(stream){
     for(let track of stream.getTracks()){
         for(let peer of peers){
             if (peer.conn !== null){
-                console.log(`Sending Track to ${peer.id}`);
+                logz(`Sending Track to ${peer.id}`);
                 peer.conn.addTrack(track);
             }
         }
@@ -98,7 +102,8 @@ window.sendTracksToPeers = sendTracksToPeers;
 window.f = function(){sendTracksToPeers(getPeerById(myId).webcamStream)}
 
 window.enableCamera = async function(){
-    console.log("enabling camera...")
+    logz("enabling camera...")
+    window.camOn = Date.now()
     let me = getPeerById(myId);
     if(!me.webcamStream){
         me.webcamStream = await navigator.mediaDevices.getUserMedia({
@@ -122,17 +127,17 @@ window.enableCamera = async function(){
 //         let screen = document.querySelector(`#screen-${peer.id}`);
 
 //         if(webcam === null){
-//             console.log(`Creating webcam div for ${peer.id}`)
+//             logz(`Creating webcam div for ${peer.id}`)
 //             createWebcamDiv(peer);
 //         }
 
 //         if(screen === null && peer.screenStream){
-//             console.log(`Creating screen div for ${peer.id}`)
+//             logz(`Creating screen div for ${peer.id}`)
 //             createScreenDiv(peer);
 //         }
 
 //         if(webcam.srcObject === null && peer.webcamStream){
-//             console.log(`adding srcObject for ${peer.id}`)
+//             logz(`adding srcObject for ${peer.id}`)
 //             webcam.srcObject = peer.webcamStream;
 //             webcam.muted = true;
 //         }
@@ -226,9 +231,10 @@ async function handleUserlistMsg(msg) {
     for (let user of msg.users) {
         if (!peerIds.includes(user.id)) {
             let p = null;
-            if(user.id != myId)
-                p = createPeerConnection(user.id);
-            console.log(`Became aware of user ${user.id}`)
+            if(user.id != myId){
+            logz(`Creating peer connection for ${user.id}`)
+            p = createPeerConnection(user.id);
+            }
             newUsers.push(user);
             newConns.push(p);
         }
@@ -238,8 +244,9 @@ async function handleUserlistMsg(msg) {
     for (let [user, connection] of zip(newUsers, newConns)) {
         user.conn = connection;
         if (user.conn && myId < user.id){
-            console.log(`Creating data channel for ${user.id}`)
-            user.dc = user.conn.createDataChannel(`chat_channel_with_${user.id}`);        
+            logz(`Creating data channel for ${user.id}`)
+            user.dc = user.conn.createDataChannel(`chat_channel_with_${user.id}`);
+            user.dc.onmessage = addToChat;  
         }
         peers.push(user);
         createWebcamDiv(user);
@@ -256,8 +263,8 @@ async function handleUserlistMsg(msg) {
 }
 
 
-function addToChat(message) {
-    console.log("adding message to chat: ", message);
+window.addToChat = function(message) {
+    logz("adding message to chat: ", message);
     message = JSON.parse(message.data);
     let text = `[${new Date().toLocaleTimeString()}] <b>${message.user}</b>: ${message.body}<br><br>`;
     document.querySelector("#messages").innerHTML += text;
@@ -293,14 +300,14 @@ export function chat(message) {
 /* Signaling messages from the server */
 async function handleVideoOfferMsg(msg) {
     let peer = getPeerById(msg.sender);
-    console.log(`Received video offer from ${peer.id}`)
+    logz(`Received video offer from ${peer.id}`)
 
     let desc = new RTCSessionDescription(msg.sdp);
     await peer.conn.setRemoteDescription(desc);
 
     let answer = await peer.conn.createAnswer();
     await peer.conn.setLocalDescription(answer);
-    console.log(`Sending video answer to ${peer.id}`)
+    logz(`Sending video answer to ${peer.id}`)
     sendToServer({
         sender: myId,
         target: peer.id,
@@ -311,8 +318,8 @@ async function handleVideoOfferMsg(msg) {
 
 async function handleVideoAnswerMsg(msg) {
     let peer = getPeerById(msg.sender);
-    console.log(`Received video answer from ${peer.id}`)
-    console.log(msg.answer);
+    logz(`Received video answer from ${peer.id}. check window.ans`)
+    window.ans = msg.answer;
 
     let desc = new RTCSessionDescription(msg.answer)
     window.desc = desc;
@@ -322,9 +329,11 @@ async function handleVideoAnswerMsg(msg) {
 async function handleNewICECandidateMsg(msg) {
     var candidate = new RTCIceCandidate(msg.candidate);
     let peer = getPeerById(msg.sender);
+    logz(`handling NewICE Candidate for ${JSON.stringify(peer)}, ${JSON.stringify(peer.conn.iceConnectionState)}`)
 
     window.iceConnectionState = JSON.parse(JSON.stringify(peer.conn.iceConnectionState));
-    if(!["new", "checking", "connected"].includes(peer.conn.iceConnectionState)){
+    // "new", "checking", "connected"
+    if(!["checking", "connected"].includes(peer.conn.iceConnectionState)){
         try{
             await peer.conn.addIceCandidate(candidate);
         }
@@ -332,23 +341,24 @@ async function handleNewICECandidateMsg(msg) {
             window.msg = msg;
             window.candidate = candidate;
             window.icePeer = peer;
-            console.log(window.iceConnectionState);
+            logz(window.iceConnectionState);
             console.error(e);
         }
     }
 }
 
 function handleHangUpMsg(msg) {
-    console.log(`Need to implement handleHangUpMsg: `, msg);
+    logz(`Need to implement handleHangUpMsg: `, msg);
 }
 
 
 /* Handlers for local ICE async events */
 async function createPeerConnection(targetId) {
-    console.log(`Setting up a connection with ${targetId}...`);
+    logz(`Setting up a connection with ${targetId}...`);
 
     let conn = new RTCPeerConnection({ iceServers: [{ 'urls': 'stun:stun.l.google.com:19302' }] });
-    let peer = getPeerById(targetId);
+    //let peer = getPeerById(targetId); 
+    // The line above was a bug as it will always be null! it needs to be invoked in ondatachannel
 
     // Set up event handlers for the ICE negotiation process.
     conn.onicecandidate = handleICECandidateEvent(targetId);
@@ -359,11 +369,12 @@ async function createPeerConnection(targetId) {
     conn.ontrack = handleTrackEvent(targetId);
 
     conn.ondatachannel = function (event) {
-        console.log(`received data channel from ${targetId}`)
-        peer.dc = event.channel;
+        logz(`received data channel from ${targetId}`)
+        let peer = getPeerById(targetId); 
         event.channel.onmessage = function (message) {
             addToChat(message);
         };
+        peer.dc = event.channel;
     }
 
     return conn;
@@ -385,7 +396,7 @@ function handleICECandidateEvent(targetId) {
 
 function handleICEConnectionStateChangeEvent(connection) {
     return function (event) {
-        // console.log("*** ICE connection state changed to " + connection.iceConnectionState);
+        // logz("*** ICE connection state changed to " + connection.iceConnectionState);
 
         switch (connection.iceConnectionState) {
             case "closed":
@@ -399,13 +410,13 @@ function handleICEConnectionStateChangeEvent(connection) {
 
 function handleICEGatheringStateChangeEvent(connection) {
     return function (event) {
-        // console.log("*** ICE gathering state changed to: " + connection.iceGatheringState);
+        // logz("*** ICE gathering state changed to: " + connection.iceGatheringState);
     }
 }
 
 function handleSignalingStateChangeEvent(connection) {
     return function (event) {
-        // console.log("*** WebRTC signaling state changed to: " + connection.signalingState);
+        // logz("*** WebRTC signaling state changed to: " + connection.signalingState);
         if (connection.signalingState == "closed")
             closeVideoCall();
     }
@@ -413,21 +424,27 @@ function handleSignalingStateChangeEvent(connection) {
 
 function handleNegotiationNeededEvent(targetId, connection) {
     return async function () {
-        console.log("*** Negotiation needed");
-
+        logz("*** Negotiation needed");
+        let shouldSend = (myId < targetId);
+        let timeDiff = Date.now() - window.camOn;
+        logz(`time since I turned on my video: ${timeDiff}`)
+        if (timeDiff < 10000){
+            shouldSend = true
+            logz(`creating offer even though my id is bigger...`)
+        }
         try {
             // Send the offer to the remote peer.
-            if(myId < targetId){
-                console.log("---> Creating offer");
+            if(shouldSend){
+                logz("---> Creating offer");
                 const offer = await connection.createOffer();
     
                 if (connection.signalingState != "stable") {
-                    console.log("     -- The connection isn't stable yet; postponing...")
+                    logz("     -- The connection isn't stable yet; postponing...")
                     return;
                 }
     
                 await connection.setLocalDescription(offer);
-                console.log("---> Sending the offer to the remote peer");
+                logz("---> Sending the offer to the remote peer");
                 sendToServer({
                     sender: myId,
                     target: targetId,
@@ -436,7 +453,7 @@ function handleNegotiationNeededEvent(targetId, connection) {
                 });
             }
         } catch (err) {
-            console.log("*** The following error occurred while handling the negotiationneeded event:");
+            logz("*** The following error occurred while handling the negotiationneeded event:");
             console.error(err);
         };
     }
@@ -446,8 +463,8 @@ function handleTrackEvent(targetId){
     return function(event) {
         let peer = getPeerById(targetId);
 
-        console.log(`*** Track Received from ${peer.id}`);
-        console.log(event);
+        logz(`*** Track Received from ${peer.id}`);
+        logz(event);
         
 
         if(peer.webcamStream === undefined)
