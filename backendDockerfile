@@ -2,8 +2,8 @@ FROM arm32v7/node
 WORKDIR /backend
 COPY ./backend/package*.json ./
 RUN ls
-RUN npm --version
+RUN which npm
 RUN npm install 
 COPY ./backend/* . 
 EXPOSE 3002
-CMD node signaling_server.js
+CMD node signaling_server.js/the/workdir/path
