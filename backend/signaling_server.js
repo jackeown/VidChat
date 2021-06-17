@@ -7,8 +7,8 @@ let state = {
 
 let newUserId = 0;
 
-let ws = helpers.getWsServer(6503, "key.pem", "cert.crt");
-ws.on("request", function (request) {
+let ws = helpers.getWsServer(3002, "key.pem", "cert.crt");
+ws.on("request", function(request) {
     let connection = request.accept("json", request.origin);
     newUserId++;
 
@@ -38,7 +38,7 @@ function status() {
 }
 
 function handleMessage(connection) {
-    return function (messageText) {
+    return function(messageText) {
         console.log(messageText);
         status();
 
@@ -49,7 +49,7 @@ function handleMessage(connection) {
             else {
                 if (msg.target && connection.room != null) {
                     let target = state.rooms[connection.room].filter(x => x.userId == msg.target)[0];
-                    if(target !== undefined)
+                    if (target !== undefined)
                         target.send(msg);
                 }
             }
@@ -58,11 +58,10 @@ function handleMessage(connection) {
 }
 
 function handleClose(connection) {
-    return function (reason, description) {
+    return function(reason, description) {
         if (state.notInARoom.includes(connection)) {
             state.notInARoom = state.notInARoom.filter(x => x.connected);
-        }
-        else {
+        } else {
             for (let r of Object.keys(state.rooms)) {
                 if (state.rooms[r].includes(connection)) {
                     state.rooms[r] = state.rooms[r].filter(x => x.connected);

@@ -13,7 +13,7 @@
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 import ssl
 
-port = 4443
+port = 3001
 httpd = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
 httpd.socket = ssl.wrap_socket(httpd.socket, keyfile='./backend/key.pem', certfile="./backend/cert.crt", server_side=True)
 
