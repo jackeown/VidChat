@@ -7,7 +7,7 @@ let state = {
 
 let newUserId = 0;
 
-let ws = helpers.getWsServer(3002, "key.pem", "cert.crt");
+let ws = helpers.getWsServer(6503, "key.pem", "cert.crt");
 ws.on("request", function(request) {
     let connection = request.accept("json", request.origin);
     newUserId++;
