@@ -53,14 +53,24 @@ jobs:
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache
 
-      - name: executing remote ssh commands using password
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          password: ${{ secrets.PASSWORD }}
-          port: ${{ secrets.PORT }}
-          script: |
-            whoami
-            ls -al
+      # - name: Install OpenVPN
+      #   run: sudo apt install -y openvpn openvpn-systemd-resolved
+      # - name: Connect to VPN
+      #   uses: "kota65535/github-openvpn-connect-action@v1"
+      #   with:
+      #     config_file: ./github/workflows/client.ovpn
+      #     username: ${{ secrets.OVPN_USERNAME }}
+      #     password: ${{ secrets.OVPN_PASSWORD }}
+      #     client_key: ${{ secrets.OVPN_CLIENT_KEY }}
+      #     tls_auth_key: ${{ secrets.OVPN_TLS_AUTH_KEY }}
+      # - name: executing remote ssh commands using password
+      #   uses: appleboy/ssh-action@master
+      #   with:
+      #     host: ${{ secrets.HOST }}
+      #     username: ${{ secrets.USERNAME }}
+      #     password: ${{ secrets.PASSWORD }}
+      #     port: ${{ secrets.PORT }}
+      #     script: |
+      #       whoami
+      #       ls -al
         
