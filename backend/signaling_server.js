@@ -7,7 +7,15 @@ let state = {
 
 let newUserId = 0;
 
-let ws = helpers.getWsServer(6503, "key.pem", "cert.crt");
+let ws;
+if(process.argv.length > 2 && process.argv[2] === "secure"){
+    console.log(`Running Securely...`);
+    ws = helpers.getWssServer(6503, "key.pem", "cert.crt");
+}
+else{
+    console.log(`Running Insecurely...`);
+    ws = helpers.getWsServer(6503);
+}
 ws.on("request", function(request) {
     let connection = request.accept("json", request.origin);
     newUserId++;

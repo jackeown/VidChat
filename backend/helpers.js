@@ -1,9 +1,10 @@
 let fs = require('fs');
 let https = require('https');
+let http = require('http');
 let WebSocketServer = require('websocket').server;
 
 
-exports.getWsServer = function(port, keyFile, certFile){
+exports.getWssServer = function(port, keyFile, certFile){
     let options = {
         key: fs.readFileSync(keyFile), 
         cert: fs.readFileSync(certFile)
@@ -24,6 +25,22 @@ exports.getWsServer = function(port, keyFile, certFile){
     return wsServer;
 }
 
+exports.getWsServer = function(port){
+    
+    let webServer = http.createServer({}, function(request, response) {
+        response.writeHead(404);
+        response.end();
+    });
+    
+    webServer.listen(port);
+    
+    let wsServer = new WebSocketServer({
+        httpServer: webServer,
+        autoAcceptConnections: false
+    });
+    
+    return wsServer;
+}
 
 
 exports.sendUserList = function(room){

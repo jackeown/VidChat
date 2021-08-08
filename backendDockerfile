@@ -5,5 +5,5 @@ RUN ls
 RUN which npm
 RUN npm install 
 COPY ./backend/* . 
-EXPOSE 4443
-CMD node signaling_server.js/the/workdir/path
+EXPOSE 6503
+CMD node signaling_server.js

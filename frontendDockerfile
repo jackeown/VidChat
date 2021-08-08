@@ -1,4 +1,4 @@
 FROM arm32v7/python 
 COPY . . 
-EXPOSE 6503
+EXPOSE 4443
 CMD python simple-https-server.py

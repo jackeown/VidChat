@@ -1,7 +1,7 @@
 let myId = null;
 window.peers = [];
 let hostname = window.location.hostname || "localhost";
-let ws = new WebSocket(`wss://${hostname}:3002`, "json");
+let ws = new WebSocket(`wss://${hostname}:6503`, "json");
 window.camOn = 0;
 window.zip = function(...args) {
     let result = [];
@@ -86,19 +86,36 @@ function closeVideoCall() {
 
 }
 
-
-function sendTracksToPeers(stream) {
-    for (let track of stream.getTracks()) {
-        for (let peer of peers) {
-            if (peer.conn !== null) {
-                logz(`Sending Track to ${peer.id}`);
-                peer.conn.addTrack(track);
+function sendTrackToPeers(track, type){
+    for (let peer of peers) {
+        if (peer.conn !== null) {
+            logz(`Trying to send ${type} ${track.kind} track to ${peer.id}`);
+            try{
+                let stream = new MediaStream();
+                stream.addTrack(track);
+                let typeInfo = {
+                    type: "trackIdentifier",
+                    // trackIdentifier: track.id,
+                    trackIdentifier: stream.id,
+                    trackType: type
+                };
+                peer.dc.send(JSON.stringify(typeInfo));
+                peer.conn.addTrack(track, stream);
+            }
+            catch(e){
+                console.error(e);
             }
         }
     }
 }
+
+function sendTracksToPeers(stream, type) {
+    for (let track of stream.getTracks()) {
+        sendTrackToPeers(track, type);
+    }
+}
 window.sendTracksToPeers = sendTracksToPeers;
-window.f = function() { sendTracksToPeers(getPeerById(myId).webcamStream) }
+window.f = function() { sendTracksToPeers(getPeerById(myId).webcamStream, "webcam") }
 
 window.enableCamera = async function() {
     logz("enabling camera...")
@@ -117,52 +134,77 @@ window.enableCamera = async function() {
     // sendTracksToPeers(me.webcamStream);
 }
 
-// function loop(){
-//     let videos = Array.from(document.querySelectorAll(".video"));
-//     let me = getPeerById(myId);
+function loop(){
+    console.log('loop...')
+    
+    try{
+        let me = getPeerById(myId);
+        for(let peer of peers){
+            let webcam = document.querySelector(`#video-${peer.id}`);
+            let screen = document.querySelector(`#screen-${peer.id}`);
+    
+            if(!webcam){
+                logz(`Creating user div for ${peer.id}`);
+                createUserDiv(peer);
+            }
+            else if(!webcam.srcObject && peer.webcamStream){
+                logz(`adding srcObject for ${peer.id}`);
+                webcam.srcObject = peer.webcamStream;
+                webcam.muted = true;
+            }
+            else if(webcam.srcObject && !peer.webcamStream){
+                webcam.srcObject = null;
+            }
+    
+            if(!screen && peer.screenStream){
+                // logz(`Creating screen div for ${peer.id}`);
+                // createScreenDiv(peer);
+            }
+            else if(screen && !peer.screenStream){
+                // logz(`Destroying screen div for ${peer.id}`);
+                // destroyScreenDiv(peer);
+            }
+            
+        }
 
-//     for(let peer of peers){
-//         let webcam = document.querySelector(`#video-${peer.id}`);
-//         let screen = document.querySelector(`#screen-${peer.id}`);
+    
+        if(me.webcamStream){
+            for(let peer of peers){
+                if(peer.id !== myId){
+                    let tracksTheyHave = peer.conn.getTransceivers().map(t => t.sender.track || t.receiver.track);
+                    console.log(tracksTheyHave);
+    
+                    for(let track of me.webcamStream.getTracks()){
+                        if(!tracksTheyHave.map(t => t.id).includes(track.id)){
+                            console.log(`Sending tracks to ${peer.name}`)
+                            sendTrackToPeers(track, "webcam");
+                        }
+                        else{
+                            console.log(`${peer.name} already has all your tracks!`);
+                        }
+                    }
+                }
+            }
+        }
+        else{
+            enableCamera();
+        }
+    }
+    catch(e){
+        console.error(e);
+        // try{
+        //     window.loopErrors.push(e);
+        // }
+        // catch(e){console.log("WTF")}
+    }
 
-//         if(webcam === null){
-//             logz(`Creating webcam div for ${peer.id}`)
-//             createWebcamDiv(peer);
-//         }
-
-//         if(screen === null && peer.screenStream){
-//             logz(`Creating screen div for ${peer.id}`)
-//             createScreenDiv(peer);
-//         }
-
-//         if(webcam.srcObject === null && peer.webcamStream){
-//             logz(`adding srcObject for ${peer.id}`)
-//             webcam.srcObject = peer.webcamStream;
-//             webcam.muted = true;
-//         }
-//     }
-
-//     // Weird hack...
-//     // If we don't have someone's video, let's send them ours.
-//     if(me.webcamStream){
-//         for(let peer of peers){
-//             let video = document.querySelector(`#video-${peer.id}`)
-//             if(video && video.srcObject === null){
-//                 sendTracksToPeers(me.webcamStream);
-//                 break;
-//             }
-//         }
-//     }
-//     else{
-//         enableCamera();
-//     }
-
-//     // setTimeout(loop, 1000);
-// }
-// setInterval(loop, 1000);
+    setTimeout(loop, 1000);
+}
+window.loopErrors = [];
+setTimeout(loop, 1000);
 
 
-function createWebcamDivButtons(user) {
+function createUserDivButtons(user) {
     let buttons = document.createElement("div");
 
     let vidToggle = document.createElement("button");
@@ -186,7 +228,7 @@ function createWebcamDivButtons(user) {
 
 
 
-window.createWebcamDiv = function(user) {
+window.createUserDiv = function(user) {
     let videos = document.getElementById("videos");
 
 
@@ -208,7 +250,7 @@ window.createWebcamDiv = function(user) {
 
     videoDiv.append(video);
     videoDiv.innerHTML += `${user.name}'s Webcam`
-    videoDiv.append(createWebcamDivButtons(user));
+    videoDiv.append(createUserDivButtons(user));
 
     videos.append(videoDiv);
 }
@@ -231,7 +273,7 @@ async function handleUserlistMsg(msg) {
         if (!peerIds.includes(user.id)) {
             let p = null;
             if (user.id != myId) {
-                logz(`Creating peer connection for ${user.id}`)
+                logz(`Creating peer connection for ${user.id}`);
                 p = createPeerConnection(user.id);
             }
             newUsers.push(user);
@@ -242,13 +284,15 @@ async function handleUserlistMsg(msg) {
     newConns = await Promise.all(newConns);
     for (let [user, connection] of zip(newUsers, newConns)) {
         user.conn = connection;
+        user.trackTypeMap = {};
+        user.mysteryTracks = [];
         if (user.conn && myId < user.id) {
             logz(`Creating data channel for ${user.id}`)
             user.dc = user.conn.createDataChannel(`chat_channel_with_${user.id}`);
-            user.dc.onmessage = addToChat;
+            user.dc.onmessage = handleDataChannelMessage(user.id);
         }
         peers.push(user);
-        createWebcamDiv(user);
+        createUserDiv(user);
     }
     // enableCamera();
 
@@ -273,6 +317,7 @@ window.addToChat = function(message) {
 
 export function chat(message) {
     message = {
+        type: "chat",
         body: message,
         user: getPeerById(myId).name,
     }
@@ -366,12 +411,11 @@ async function createPeerConnection(targetId) {
     conn.onnegotiationneeded = handleNegotiationNeededEvent(targetId, conn);
     conn.ontrack = handleTrackEvent(targetId);
 
+    let handler = handleDataChannelMessage(targetId);
     conn.ondatachannel = function(event) {
         logz(`received data channel from ${targetId}`)
         let peer = getPeerById(targetId);
-        event.channel.onmessage = function(message) {
-            addToChat(message);
-        };
+        event.channel.onmessage = handler;
         peer.dc = event.channel;
     }
 
@@ -423,13 +467,14 @@ function handleSignalingStateChangeEvent(connection) {
 function handleNegotiationNeededEvent(targetId, connection) {
     return async function() {
         logz("*** Negotiation needed");
-        let shouldSend = (myId < targetId);
-        let timeDiff = Date.now() - window.camOn;
-        logz(`time since I turned on my video: ${timeDiff}`)
-        if (timeDiff < 10000) {
-            shouldSend = true
-            logz(`creating offer even though my id is bigger...`)
-        }
+        // let shouldSend = (myId < targetId);
+        let shouldSend = true;
+        // let timeDiff = Date.now() - window.camOn;
+        // logz(`time since I turned on my video: ${timeDiff}`)
+        // if (timeDiff < 10000) {
+        //     shouldSend = true
+        //     logz(`creating offer even though my id is bigger...`)
+        // }
         try {
             // Send the offer to the remote peer.
             if (shouldSend) {
@@ -457,22 +502,58 @@ function handleNegotiationNeededEvent(targetId, connection) {
     }
 }
 
+
+
+function handleDataChannelMessage(id){
+    return function(message){
+        window.dcmessage = message;
+        let peer = getPeerById(id);
+        let parsed = JSON.parse(message.data);
+        if(parsed.type === "chat"){
+            addToChat(message);
+        }
+        else if(parsed.type === "trackIdentifier"){
+            peer.trackTypeMap[parsed.trackIdentifier] = parsed.trackType;
+        }
+    };
+}
+
 function handleTrackEvent(targetId) {
     return function(event) {
+        logz(`*** Track Received from ${targetId}`);
+        event.track.fakeId = event.streams[0].id;
         let peer = getPeerById(targetId);
-
-        logz(`*** Track Received from ${peer.id}`);
-        logz(event);
-
-
-        if (peer.webcamStream === undefined)
-            peer.webcamStream = new MediaStream();
-
-        if (peer.webcamStream.getVideoTracks().length == 0 && event.track.kind == "video")
-            peer.webcamStream.addTrack(event.track)
-        else if (peer.webcamStream.getAudioTracks().length == 0 && event.track.kind == "audio")
-            peer.webcamStream.addTrack(event.track)
-
-        document.getElementById(`video-${targetId}`).srcObject = peer.webcamStream;
+        peer.mysteryTracks.push(event.track);
     }
 }
+
+
+function updateOrCreateStream(peer, streamName, track){
+    if (!peer[streamName])
+        peer[streamName] = new MediaStream();
+
+    if (peer[streamName].getVideoTracks().length == 0 && track.kind == "video")
+        peer[streamName].addTrack(track);
+    else if (peer[streamName].getAudioTracks().length == 0 && track.kind == "audio"){
+        peer[streamName].addTrack(track);
+    }
+}
+
+function solveMysteryTracks(){
+    for(let peer of peers){
+        let removed = [];
+        for(let [i, track] of peer.mysteryTracks.entries()){
+            if(track.fakeId in peer.trackTypeMap){
+                if(peer.trackTypeMap[track.fakeId] === "webcam"){
+                    updateOrCreateStream(peer, "webcamStream", track);
+                }
+                else if(peer.trackTypeMap[track.fakeId] === "screen"){
+                    updateOrCreateStream(peer, "screenStream", track);
+                }
+                removed.push(i);
+            }
+        }
+        peer.mysteryTracks = peer.mysteryTracks.filter((x,i) => !removed.includes(i));
+    }
+}
+setInterval(solveMysteryTracks, 1000);
