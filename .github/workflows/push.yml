@@ -54,14 +54,14 @@ jobs:
           cache-to: type=local,dest=/tmp/.buildx-cache
 
       - name: Call Restart Backend Service Webhook
-        id: restart_service_webhook
+        id: restart_backend_service_webhook
         uses: fjogeleit/http-request-action@master
         with:
           url: ${{ secrets.BACKEND_WEBHOOK_URL }}
           method: 'POST'
         
       - name: Call Restart Frontend Service Webhook
-        id: restart_service_webhook
+        id: restart_frontend_service_webhook
         uses: fjogeleit/http-request-action@master
         with:
           url: ${{ secrets.FRONTEND_WEBHOOK_URL }}
