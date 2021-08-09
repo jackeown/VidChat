@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Chat</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    
+    <button onclick="joinRoom('room','Jack')">Join as Jack</button>
+    <button onclick="joinRoom('room','James')">Join as James</button>
+    <button onclick="joinRoom('room','Sarah')">Join as Sarah</button>
+    <button onclick="joinRoom('room','Micah')">Join as Micah</button>
+    <button onclick="joinRoom('room','Nora')">Join as Nora</button>
+    <button onclick="joinRoom('room','Bob')">Join as Bob</button>
+    <button onclick="joinRoom('room','Kathy')">Join as Kathy</button>
+    <button onclick="joinRoom('room','Mark')">Join as Mark</button>
+    <button onclick="joinRoom('room','Miriam')">Join as Miriam</button>
+
+    <div id="videos"></div>
+
+    <div id="chat">
+        <h1>Chat</h1>
+        <hr>
+        <div id="messages"></div>
+        <input type="text" id="chatInput" placeholder="Type a message">
+    </div>
+
+    <script src="vidChat.js" type="module"></script>
+</body>
+</html>
