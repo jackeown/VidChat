@@ -1,6 +1,7 @@
 let myId = null;
 window.peers = [];
-let hostname = window.location.hostname || "localhost";
+let hostname = (window.location.hostname || "localhost");
+let port = 6503;
 function isRealHostname(hostname){
     let prefixes = [
         "192.168.",
@@ -12,9 +13,11 @@ function isRealHostname(hostname){
 }
 if(isRealHostname(hostname)){
     hostname = "sock." + hostname;
+    port = 443;
 }
-console.log(`Websocket Hostname: ${hostname}`);
-let ws = new WebSocket(`wss://${hostname}:6503`, "json");
+let wsLocation = `wss://${hostname}:${port}`;
+console.log(`Websocket at: ${wsLocation}`);
+let ws = new WebSocket(wsLocation, "json");
 window.camOn = 0;
 window.zip = function(...args) {
     let result = [];
