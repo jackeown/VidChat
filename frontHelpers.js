@@ -447,7 +447,7 @@ async function createPeerConnection(targetId) {
         "stun:stun.avigora.fr:3478",
         "stun:stun.awa-shima.com:3478"
     ]
-    let conn = new RTCPeerConnection({ iceServers: iceServers.map(s => {urls: s})});
+    let conn = new RTCPeerConnection({ iceServers: iceServers.map(s => ({urls: s}))});
 
     // Set up event handlers for the ICE negotiation process.
     conn.onicecandidate = handleICECandidateEvent(targetId);
