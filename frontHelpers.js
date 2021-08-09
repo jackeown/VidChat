@@ -417,7 +417,7 @@ async function createPeerConnection(targetId) {
     logz(`Setting up a connection with ${targetId}...`);
 
 
-    let iceServers = [
+    window.iceServers = [
         {urls: "stun:stun.l.google.com:19302"},
         {
             urls:"turn:turn.vidchat.mckeown.in:3478",
