@@ -8,7 +8,7 @@ function isRealHostname(hostname){
         "localhost",
         "127."
     ]
-    return !Array.some(prefixes.map(p => hostname.startsWith(p)));
+    return !prefixes.some(p => hostname.startsWith(p));
 }
 if(isRealHostname(hostname)){
     hostname = "sock." + hostname;
