@@ -418,10 +418,15 @@ async function createPeerConnection(targetId) {
 
 
     let iceServers = [
-        "stun:stun.l.google.com:19302",
-        "turn:turn.vidchat.mckeown.in:3478"
+        {urls: "stun:stun.l.google.com:19302"},
+        {
+            urls:"turn:turn.vidchat.mckeown.in:3478",
+            username: "mckeown",
+            credential: "vidchat"
+        }
+
     ]
-    let conn = new RTCPeerConnection({ iceServers: iceServers.map(s => ({urls: s}))});
+    let conn = new RTCPeerConnection({ iceServers: iceServers });
 
     // Set up event handlers for the ICE negotiation process.
     conn.onicecandidate = handleICECandidateEvent(targetId);
