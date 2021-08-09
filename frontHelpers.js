@@ -1,6 +1,19 @@
 let myId = null;
 window.peers = [];
 let hostname = window.location.hostname || "localhost";
+function isRealHostname(hostname){
+    let prefixes = [
+        "192.168.",
+        "10.",
+        "localhost",
+        "127."
+    ]
+    return Array.some(prefixes.map(hostname.startsWith));
+}
+if(isRealHostname(hostname)){
+    hostname = "sock." + hostname;
+}
+console.log(`Websocket Hostname: ${hostname}`);
 let ws = new WebSocket(`wss://${hostname}:6503`, "json");
 window.camOn = 0;
 window.zip = function(...args) {
