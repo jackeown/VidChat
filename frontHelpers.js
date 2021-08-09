@@ -111,7 +111,6 @@ function sendTrackToPeers(track, type){
                 stream.addTrack(track);
                 let typeInfo = {
                     type: "trackIdentifier",
-                    // trackIdentifier: track.id,
                     trackIdentifier: stream.id,
                     trackType: type
                 };
@@ -147,7 +146,6 @@ window.enableCamera = async function() {
         });
         // me.webcamStream = await navigator.mediaDevices.getDisplayMedia()
     }
-    // sendTracksToPeers(me.webcamStream);
 }
 
 function loop(){
@@ -339,8 +337,11 @@ export function chat(message) {
     }
 
     for (let peer of peers) {
-        if (peer.id != myId)
-            peer.dc.send(JSON.stringify(message))
+        if (peer.id != myId && peer.dc){
+            try{
+                peer.dc.send(JSON.stringify(message))
+            }catch(e){console.error(e)}
+        }
     }
 
     addToChat({ data: JSON.stringify(message) });
@@ -415,9 +416,38 @@ function handleHangUpMsg(msg) {
 async function createPeerConnection(targetId) {
     logz(`Setting up a connection with ${targetId}...`);
 
-    let conn = new RTCPeerConnection({ iceServers: [{ 'urls': 'stun:stun.l.google.com:19302' }] });
-    //let peer = getPeerById(targetId); 
-    // The line above was a bug as it will always be null! it needs to be invoked in ondatachannel
+
+    let iceServers = [
+        "stun:stun.l.google.com:19302",
+
+        "stun:iphone-stun.strato-iphone.de:3478",
+        "stun:numb.viagenie.ca:3478",
+        "stun:s1.taraba.net:3478",
+        "stun:s2.taraba.net:3478",
+        "stun:stun.12connect.com:3478",
+        "stun:stun.12voip.com:3478",
+        "stun:stun.1und1.de:3478",
+        "stun:stun.2talk.co.nz:3478",
+        "stun:stun.2talk.com:3478",
+        "stun:stun.3clogic.com:3478",
+        "stun:stun.3cx.com:3478",
+        "stun:stun.a-mm.tv:3478",
+        "stun:stun.aa.net.uk:3478",
+        "stun:stun.acrobits.cz:3478",
+        "stun:stun.actionvoip.com:3478",
+        "stun:stun.advfn.com:3478",
+        "stun:stun.aeta-audio.com:3478",
+        "stun:stun.aeta.com:3478",
+        "stun:stun.alltel.com.au:3478",
+        "stun:stun.altar.com.pl:3478",
+        "stun:stun.annatel.net:3478",
+        "stun:stun.antisip.com:3478",
+        "stun:stun.arbuz.ru:3478",
+        "stun:stun.avigora.com:3478",
+        "stun:stun.avigora.fr:3478",
+        "stun:stun.awa-shima.com:3478"
+    ]
+    let conn = new RTCPeerConnection({ iceServers: iceServers.map(s => {urls: s})});
 
     // Set up event handlers for the ICE negotiation process.
     conn.onicecandidate = handleICECandidateEvent(targetId);
