@@ -13,9 +13,8 @@ html, body{
 }
 
 #chatInput {
-    width: 100%;
-    height: 1em;
-    padding: 1em;
+    width: -webkit-fill-available;
+    height: 50px;
 }
 
 #videos {
