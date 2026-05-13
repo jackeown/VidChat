@@ -35,6 +35,7 @@
                         <button class="layout-button" type="button" data-layout="spotlight">Spotlight</button>
                         <button class="layout-button" type="button" data-layout="filmstrip">Filmstrip</button>
                     </div>
+                    <button id="appSettingsButton" type="button" title="Open settings" aria-label="Open settings">⚙</button>
                 </div>
             </div>
         </section>
@@ -45,24 +46,51 @@
     <template id="tileTemplate">
         <article class="video-tile">
             <video playsinline autoplay></video>
-            <div class="tile-bar">
-                <div>
-                    <strong class="tile-title"></strong>
-                    <span class="tile-subtitle"></span>
-                </div>
-                <div class="tile-actions">
-                    <button class="focus-button" type="button" title="Focus this video">Focus</button>
-                    <button class="audio-button" type="button" title="Adjust this video's audio">Audio</button>
-                </div>
+            <div class="tile-chip">
+                <strong class="tile-title"></strong>
             </div>
-            <div class="audio-popover" hidden>
-                <label class="volume-control" title="Adjust this video's audio">
-                    <span>Audio</span>
-                    <input class="volume-slider" type="range" min="0" max="1" step="0.05" value="1">
-                </label>
-            </div>
+            <button class="tile-settings-button" type="button" title="Open feed settings">⚙</button>
         </article>
     </template>
+
+    <dialog id="feedModal" class="modal">
+        <form method="dialog" class="modal-panel">
+            <div class="modal-header">
+                <div>
+                    <h2 id="feedModalTitle">Feed settings</h2>
+                    <p id="feedModalSubtitle"></p>
+                </div>
+                <button value="close" type="submit" title="Close">Close</button>
+            </div>
+            <div id="feedModalControls" class="modal-controls"></div>
+        </form>
+    </dialog>
+
+    <dialog id="appSettingsModal" class="modal">
+        <form method="dialog" class="modal-panel">
+            <div class="modal-header">
+                <div>
+                    <h2>Settings</h2>
+                    <p>Video display behavior</p>
+                </div>
+                <button value="close" type="submit" title="Close">Close</button>
+            </div>
+            <div class="modal-controls">
+                <label class="setting-row">
+                    <input type="radio" name="videoFit" value="contain" checked>
+                    <span>Scale to fit</span>
+                </label>
+                <label class="setting-row">
+                    <input type="radio" name="videoFit" value="cover">
+                    <span>Fill tile and crop</span>
+                </label>
+                <label class="setting-row">
+                    <input id="mirrorLocalCamera" type="checkbox" checked>
+                    <span>Mirror my camera</span>
+                </label>
+            </div>
+        </form>
+    </dialog>
 
     <script src="vidChat.js"></script>
 </body>

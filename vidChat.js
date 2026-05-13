@@ -14,7 +14,10 @@
         outboundCalls: new Map(),
         dataConnections: new Map(),
         tiles: new Map(),
+        tileConfigs: new Map(),
         layout: "grid",
+        videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
+        mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
         focusedTileId: null,
         zIndex: 1
     };
@@ -26,11 +29,20 @@
         cameraToggle: document.getElementById("cameraToggle"),
         screenToggle: document.getElementById("screenToggle"),
         screenAudio: document.getElementById("screenAudio"),
+        appSettingsButton: document.getElementById("appSettingsButton"),
+        appSettingsModal: document.getElementById("appSettingsModal"),
+        mirrorLocalCamera: document.getElementById("mirrorLocalCamera"),
+        feedModal: document.getElementById("feedModal"),
+        feedModalTitle: document.getElementById("feedModalTitle"),
+        feedModalSubtitle: document.getElementById("feedModalSubtitle"),
+        feedModalControls: document.getElementById("feedModalControls"),
         videos: document.getElementById("videos"),
         tileTemplate: document.getElementById("tileTemplate")
     };
 
     updateUrl(roomId);
+    applyVideoFit();
+    applyMirrorSetting();
     bindUi();
     window.addEventListener("resize", keepTilesInsideStage);
     startRoom();
@@ -347,50 +359,32 @@
         const tile = fragment.querySelector(".video-tile");
         const video = fragment.querySelector("video");
         const title = fragment.querySelector(".tile-title");
-        const subtitle = fragment.querySelector(".tile-subtitle");
-        const tileActions = fragment.querySelector(".tile-actions");
-        const focusButton = fragment.querySelector(".focus-button");
-        const audioButton = fragment.querySelector(".audio-button");
-        const audioPopover = fragment.querySelector(".audio-popover");
-        const volume = fragment.querySelector(".volume-slider");
+        const settingsButton = fragment.querySelector(".tile-settings-button");
         const resizeHandle = document.createElement("span");
 
         tile.dataset.tileId = config.id;
         tile.classList.add(config.kind);
         tile.classList.toggle("preview", Boolean(config.preview));
+        tile.classList.toggle("local-camera", config.local && config.kind === "camera");
         tile.style.zIndex = String(++state.zIndex);
         title.textContent = `${config.owner} - ${config.kind === "screen" ? "Screen" : "Camera"}`;
-        subtitle.textContent = config.subtitle;
         video.srcObject = config.stream;
         video.muted = config.muted;
-        video.volume = Number(volume.value);
         resizeHandle.className = "resize-handle";
         resizeHandle.title = "Resize video";
         resizeHandle.setAttribute("aria-hidden", "true");
 
-        if (config.local) {
-            addLocalMuteControls(tileActions, tile, config.kind, config.stream);
-        }
-
-        volume.disabled = config.local;
-        audioButton.disabled = config.local;
-        audioButton.title = config.local ? "Local preview audio is muted" : "Adjust this video's audio";
-        audioButton.addEventListener("click", (event) => {
+        settingsButton.addEventListener("click", (event) => {
             event.stopPropagation();
-            const open = audioPopover.hidden;
-            closeAudioPopovers(tile);
-            audioPopover.hidden = !open;
-            audioButton.classList.toggle("active", open);
-        });
-        volume.addEventListener("input", () => {
-            video.volume = Number(volume.value);
-            video.muted = video.volume === 0;
+            openFeedModal(config.id);
         });
 
-        focusButton.addEventListener("click", () => focusTile(config.id));
-        tile.addEventListener("dblclick", () => focusTile(config.id));
+        tile.addEventListener("dblclick", (event) => {
+            if (isInteractiveControl(event.target)) return;
+            enterTileFullscreen(tile);
+        });
         tile.addEventListener("pointerdown", () => bringToFront(tile));
-        bindTileDragging(tile, fragment.querySelector(".tile-bar"));
+        bindTileDragging(tile, tile);
         bindTileResizing(tile, resizeHandle);
 
         if (config.preview) {
@@ -415,36 +409,15 @@
         tile.appendChild(resizeHandle);
         els.videos.appendChild(fragment);
         state.tiles.set(config.id, tile);
+        state.tileConfigs.set(config.id, config);
+        updateLocalTileState(config.id);
         if (oldFrame && oldFrame.placed) {
             setTileFrame(tile, oldFrame.x, oldFrame.y, oldFrame.width, oldFrame.height);
         } else {
             arrangeTiles(state.layout, false);
         }
+        resolveOverlaps();
         applyFocus();
-    }
-
-    function addLocalMuteControls(tileActions, tile, kind, stream) {
-        const videoButton = document.createElement("button");
-        const audioButton = document.createElement("button");
-
-        videoButton.type = "button";
-        audioButton.type = "button";
-        videoButton.className = "track-toggle";
-        audioButton.className = "track-toggle";
-
-        videoButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleTracks(stream.getVideoTracks());
-            updateTrackState(tile, kind, stream, videoButton, audioButton);
-        });
-        audioButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleTracks(stream.getAudioTracks());
-            updateTrackState(tile, kind, stream, videoButton, audioButton);
-        });
-
-        tileActions.prepend(videoButton, audioButton);
-        updateTrackState(tile, kind, stream, videoButton, audioButton);
     }
 
     function toggleTracks(tracks) {
@@ -455,12 +428,20 @@
         });
     }
 
-    function updateTrackState(tile, kind, stream, videoButton, audioButton) {
+    function updateLocalTileState(id) {
+        const tile = state.tiles.get(id);
+        const config = state.tileConfigs.get(id);
+        if (!tile || !config || !config.local) return;
+
+        tile.classList.toggle("video-muted", !config.stream.getVideoTracks().some((track) => track.enabled));
+    }
+
+    function updateTrackState(config, videoButton, audioButton) {
+        const { kind, stream } = config;
         const videoTracks = stream.getVideoTracks();
         const audioTracks = stream.getAudioTracks();
         const videoOn = videoTracks.some((track) => track.enabled);
         const audioOn = audioTracks.some((track) => track.enabled);
-        const subtitle = tile.querySelector(".tile-subtitle");
 
         videoButton.textContent = videoTracks.length === 0 ? "No video" : kind === "screen" ? (videoOn ? "Hide" : "Show") : (videoOn ? "Mute video" : "Show video");
         audioButton.textContent = audioTracks.length === 0 ? "No audio" : kind === "screen" ? (audioOn ? "Mute audio" : "Unmute audio") : (audioOn ? "Mute mic" : "Unmute mic");
@@ -469,8 +450,8 @@
         audioButton.classList.toggle("danger", audioOn);
         videoButton.disabled = videoTracks.length === 0;
         audioButton.disabled = audioTracks.length === 0;
-        tile.classList.toggle("video-muted", !videoOn);
-        if (subtitle) subtitle.textContent = localSubtitle(kind, stream, tile.classList.contains("preview"));
+        updateLocalTileState(config.id);
+        updateFeedModalSubtitle(config);
     }
 
     function localSubtitle(kind, stream, preview) {
@@ -498,14 +479,74 @@
         return "Camera and microphone shared";
     }
 
-    function closeAudioPopovers(exceptTile) {
-        for (const tile of state.tiles.values()) {
-            if (tile === exceptTile) continue;
-            const popover = tile.querySelector(".audio-popover");
-            const button = tile.querySelector(".audio-button");
-            if (popover) popover.hidden = true;
-            if (button) button.classList.remove("active");
+    function openFeedModal(id) {
+        const config = state.tileConfigs.get(id);
+        const tile = state.tiles.get(id);
+        if (!config || !tile) return;
+
+        els.feedModalTitle.textContent = `${config.owner} - ${config.kind === "screen" ? "Screen" : "Camera"}`;
+        els.feedModalControls.replaceChildren();
+        updateFeedModalSubtitle(config);
+
+        const focusButton = makeModalButton("Focus video", () => focusTile(id));
+        els.feedModalControls.appendChild(focusButton);
+
+        if (config.preview && typeof config.previewAction === "function") {
+            els.feedModalControls.appendChild(makeModalButton("Share camera", config.previewAction, "primary"));
         }
+
+        if (config.local) {
+            const videoButton = makeModalButton("", () => {
+                toggleTracks(config.stream.getVideoTracks());
+                updateTrackState(config, videoButton, audioButton);
+            });
+            const audioButton = makeModalButton("", () => {
+                toggleTracks(config.stream.getAudioTracks());
+                updateTrackState(config, videoButton, audioButton);
+            });
+
+            updateTrackState(config, videoButton, audioButton);
+            els.feedModalControls.append(videoButton, audioButton);
+        } else {
+            const video = tile.querySelector("video");
+            const volumeLabel = document.createElement("label");
+            const volumeText = document.createElement("span");
+            const volume = document.createElement("input");
+
+            volumeLabel.className = "volume-control";
+            volumeText.textContent = "Audio";
+            volume.type = "range";
+            volume.className = "volume-slider";
+            volume.min = "0";
+            volume.max = "1";
+            volume.step = "0.05";
+            volume.value = String(video.volume || 1);
+            volume.addEventListener("input", () => {
+                video.volume = Number(volume.value);
+                video.muted = video.volume === 0;
+            });
+
+            volumeLabel.append(volumeText, volume);
+            els.feedModalControls.appendChild(volumeLabel);
+        }
+
+        els.feedModal.showModal();
+    }
+
+    function updateFeedModalSubtitle(config) {
+        if (!config) return;
+        els.feedModalSubtitle.textContent = config.local
+            ? localSubtitle(config.kind, config.stream, Boolean(config.preview))
+            : config.subtitle;
+    }
+
+    function makeModalButton(label, onClick, className) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        if (className) button.className = className;
+        button.addEventListener("click", onClick);
+        return button;
     }
 
     function removeTile(id) {
@@ -513,6 +554,7 @@
         if (!tile) return;
         tile.remove();
         state.tiles.delete(id);
+        state.tileConfigs.delete(id);
         if (state.focusedTileId === id) state.focusedTileId = null;
         applyFocus();
     }
@@ -531,6 +573,21 @@
         applyFocus();
     }
 
+    async function enterTileFullscreen(tile) {
+        if (document.fullscreenElement === tile) {
+            await document.exitFullscreen();
+            return;
+        }
+
+        if (document.fullscreenElement) {
+            await document.exitFullscreen();
+        }
+
+        if (tile.requestFullscreen) {
+            await tile.requestFullscreen();
+        }
+    }
+
     function applyFocus() {
         for (const [id, tile] of state.tiles) {
             tile.classList.toggle("focused", id === state.focusedTileId);
@@ -539,7 +596,8 @@
 
     function setLayout(layout) {
         state.layout = layout;
-        els.videos.className = `video-stage ${layout}`;
+        els.videos.classList.remove("grid", "spotlight", "filmstrip");
+        els.videos.classList.add(layout);
         document.querySelectorAll(".layout-button").forEach((button) => {
             button.classList.toggle("active", button.dataset.layout === layout);
         });
@@ -549,6 +607,15 @@
     function keepTilesInsideStage() {
         for (const tile of state.tiles.values()) {
             setTileFrame(tile, tile.offsetLeft, tile.offsetTop, tile.offsetWidth, tile.offsetHeight);
+        }
+        resolveOverlaps();
+    }
+
+    function resolveOverlaps() {
+        for (const tile of state.tiles.values()) {
+            if (frameOverlaps(tile, currentFrame(tile))) {
+                setTileFrame(tile, tile.offsetLeft, tile.offsetTop, tile.offsetWidth, tile.offsetHeight);
+            }
         }
     }
 
@@ -576,45 +643,48 @@
         const gap = 10;
         const columns = Math.max(1, Math.ceil(Math.sqrt(tiles.length)));
         const rows = Math.max(1, Math.ceil(tiles.length / columns));
-        const tileWidth = Math.max(180, (stage.width - gap * (columns - 1)) / columns);
-        const tileHeight = Math.max(140, (stage.height - gap * (rows - 1)) / rows);
+        const tileWidth = Math.max(120, (stage.width - gap * (columns - 1)) / columns);
+        const tileHeight = Math.max(90, (stage.height - gap * (rows - 1)) / rows);
 
         tiles.forEach((tile, index) => {
             if (!force && tile.dataset.placed === "true") return;
             const column = index % columns;
             const row = Math.floor(index / columns);
-            setTileFrame(tile, column * (tileWidth + gap), row * (tileHeight + gap), tileWidth, tileHeight);
+            setTileFrame(tile, column * (tileWidth + gap), row * (tileHeight + gap), tileWidth, tileHeight, false);
         });
     }
 
     function arrangeSpotlight(tiles, stage, force) {
         const gap = 10;
         const focused = state.focusedTileId ? state.tiles.get(state.focusedTileId) : tiles[0];
-        const sideWidth = Math.min(280, Math.max(180, stage.width * 0.25));
+        const sideWidth = Math.min(280, Math.max(120, stage.width * 0.25));
         const mainWidth = tiles.length > 1 ? stage.width - sideWidth - gap : stage.width;
         const mainHeight = stage.height;
 
         if (focused && (force || focused.dataset.placed !== "true")) {
-            setTileFrame(focused, 0, 0, mainWidth, mainHeight);
+            setTileFrame(focused, 0, 0, mainWidth, mainHeight, false);
         }
 
         const sideTiles = tiles.filter((tile) => tile !== focused);
-        const sideHeight = Math.max(140, (stage.height - gap * Math.max(0, sideTiles.length - 1)) / Math.max(1, sideTiles.length));
+        const sideHeight = Math.max(90, (stage.height - gap * Math.max(0, sideTiles.length - 1)) / Math.max(1, sideTiles.length));
         sideTiles.forEach((tile, index) => {
             if (!force && tile.dataset.placed === "true") return;
-            setTileFrame(tile, mainWidth + gap, index * (sideHeight + gap), sideWidth, sideHeight);
+            setTileFrame(tile, mainWidth + gap, index * (sideHeight + gap), sideWidth, sideHeight, false);
         });
     }
 
     function arrangeFilmstrip(tiles, stage, force) {
         const gap = 10;
-        const tileWidth = Math.min(360, Math.max(220, stage.width * 0.34));
-        const tileHeight = Math.max(150, stage.height - gap);
+        if (tiles.length * 120 + Math.max(0, tiles.length - 1) * gap > stage.width) {
+            arrangeGrid(tiles, stage, force);
+            return;
+        }
+        const tileWidth = Math.max(120, (stage.width - gap * Math.max(0, tiles.length - 1)) / Math.max(1, tiles.length));
+        const tileHeight = Math.max(90, stage.height - gap);
 
         tiles.forEach((tile, index) => {
             if (!force && tile.dataset.placed === "true") return;
-            const x = Math.min(stage.width - tileWidth, index * (tileWidth + gap));
-            setTileFrame(tile, Math.max(0, x), 0, tileWidth, tileHeight);
+            setTileFrame(tile, index * (tileWidth + gap), 0, tileWidth, tileHeight, false);
         });
     }
 
@@ -689,20 +759,68 @@
         };
     }
 
-    function setTileFrame(tile, x, y, width, height) {
+    function setTileFrame(tile, x, y, width, height, avoidOverlap = true) {
         const stage = stageRect();
-        const minWidth = 180;
-        const minHeight = 140;
-        const nextWidth = clamp(width, minWidth, Math.max(minWidth, stage.width));
-        const nextHeight = clamp(height, minHeight, Math.max(minHeight, stage.height));
-        const nextX = clamp(x, 0, Math.max(0, stage.width - nextWidth));
-        const nextY = clamp(y, 0, Math.max(0, stage.height - nextHeight));
+        const minWidth = 120;
+        const minHeight = 90;
+        let frame = {
+            width: clamp(width, minWidth, Math.max(minWidth, stage.width)),
+            height: clamp(height, minHeight, Math.max(minHeight, stage.height))
+        };
+        frame.x = clamp(x, 0, Math.max(0, stage.width - frame.width));
+        frame.y = clamp(y, 0, Math.max(0, stage.height - frame.height));
 
-        tile.style.left = `${nextX}px`;
-        tile.style.top = `${nextY}px`;
-        tile.style.width = `${nextWidth}px`;
-        tile.style.height = `${nextHeight}px`;
+        if (avoidOverlap && frameOverlaps(tile, frame)) {
+            frame = findOpenFrame(tile, frame) || currentFrame(tile, stage);
+        }
+
+        tile.style.left = `${frame.x}px`;
+        tile.style.top = `${frame.y}px`;
+        tile.style.width = `${frame.width}px`;
+        tile.style.height = `${frame.height}px`;
         tile.dataset.placed = "true";
+    }
+
+    function findOpenFrame(tile, frame) {
+        const stage = stageRect();
+        const step = 10;
+        const maxX = Math.max(0, stage.width - frame.width);
+        const maxY = Math.max(0, stage.height - frame.height);
+
+        for (let y = 0; y <= maxY; y += step) {
+            for (let x = 0; x <= maxX; x += step) {
+                const candidate = { ...frame, x, y };
+                if (!frameOverlaps(tile, candidate)) return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    function frameOverlaps(tile, frame) {
+        for (const other of state.tiles.values()) {
+            if (other === tile) continue;
+            if (rectsOverlap(frame, currentFrame(other))) return true;
+        }
+        return false;
+    }
+
+    function currentFrame(tile, stage = stageRect()) {
+        const width = clamp(tile.offsetWidth || 120, 120, Math.max(120, stage.width));
+        const height = clamp(tile.offsetHeight || 90, 90, Math.max(90, stage.height));
+        return {
+            x: clamp(tile.offsetLeft || 0, 0, Math.max(0, stage.width - width)),
+            y: clamp(tile.offsetTop || 0, 0, Math.max(0, stage.height - height)),
+            width,
+            height
+        };
+    }
+
+    function rectsOverlap(a, b) {
+        return a.x < b.x + b.width
+            && a.x + a.width > b.x
+            && a.y < b.y + b.height
+            && a.y + a.height > b.y;
     }
 
     function stageRect() {
@@ -749,12 +867,33 @@
         });
         els.cameraToggle.addEventListener("click", toggleCamera);
         els.screenToggle.addEventListener("click", toggleScreen);
-        document.addEventListener("click", (event) => {
-            if (!event.target.closest(".audio-popover, .audio-button")) closeAudioPopovers();
+        els.appSettingsButton.addEventListener("click", () => els.appSettingsModal.showModal());
+        els.mirrorLocalCamera.checked = state.mirrorLocalCamera;
+        els.mirrorLocalCamera.addEventListener("change", () => {
+            state.mirrorLocalCamera = els.mirrorLocalCamera.checked;
+            localStorage.setItem("vidChatMirrorLocalCamera", String(state.mirrorLocalCamera));
+            applyMirrorSetting();
+        });
+        document.querySelectorAll("input[name='videoFit']").forEach((input) => {
+            input.checked = input.value === state.videoFit;
+            input.addEventListener("change", () => {
+                if (!input.checked) return;
+                state.videoFit = input.value;
+                localStorage.setItem("vidChatVideoFit", state.videoFit);
+                applyVideoFit();
+            });
         });
         document.querySelectorAll(".layout-button").forEach((button) => {
             button.addEventListener("click", () => setLayout(button.dataset.layout));
         });
+    }
+
+    function applyVideoFit() {
+        els.videos.classList.toggle("fit-cover", state.videoFit === "cover");
+    }
+
+    function applyMirrorSetting() {
+        els.videos.classList.toggle("mirror-local-camera", state.mirrorLocalCamera);
     }
 
     function updateMediaButtons() {
