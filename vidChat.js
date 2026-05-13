@@ -31,25 +31,29 @@
         chatHistory: []
     };
 
-    const emojis = [
-        { code: ":smile:", char: "😊" }, { code: ":haha:", char: "😂" }, { code: ":happy:", char: "😄" },
-        { code: ":wink:", char: "😉" }, { code: ":heart:", char: "❤️" }, { code: ":thumbsup:", char: "👍" },
-        { code: ":rocket:", char: "🚀" }, { code: ":party:", char: "🥳" }, { code: ":thinking:", char: "🤔" },
-        { code: ":fire:", char: "🔥" }, { code: ":eyes:", char: "👀" }, { code: ":ok:", char: "👌" },
-        { code: ":clap:", char: "👏" }, { code: ":check:", char: "✅" }, { code: ":star:", char: "⭐" },
-        { code: ":cool:", char: "😎" }, { code: ":cry:", char: "😢" }, { code: ":angry:", char: "😠" },
-        { code: ":mindblown:", char: "🤯" }, { code: ":sleeping:", char: "😴" }, { code: ":sob:", char: "😭" },
-        { code: ":blush:", char: "😊" }, { code: ":yum:", char: "😋" }, { code: ":sunglasses:", char: "😎" },
-        { code: ":smirk:", char: "😏" }, { code: ":neutral:", char: "😐" }, { code: ":expressionless:", char: "😑" },
-        { code: ":hmmm:", char: "🤔" }, { code: ":pensive:", char: "😔" }, { code: ":confused:", char: "😕" },
-        { code: ":fear:", char: "😨" }, { code: ":weary:", char: "😩" }, { code: ":triumph:", char: "😤" },
-        { code: ":boom:", char: "💥" }, { code: ":100:", char: "💯" }, { code: ":praise:", char: "🙌" },
-        { code: ":wave:", char: "👋" }, { code: ":pray:", char: "🙏" }, { code: ":flex:", char: "💪" },
-        { code: ":sparkles:", char: "✨" }, { code: ":cloud:", char: "☁️" }, { code: ":sun:", char: "☀️" },
-        { code: ":moon:", char: "🌙" }, { code: ":cat:", char: "🐱" }, { code: ":dog:", char: "🐶" },
-        { code: ":pizza:", char: "🍕" }, { code: ":beer:", char: "🍺" }, { code: ":coffee:", char: "☕" },
-        { code: ":gift:", char: "🎁" }, { code: ":money:", char: "💰" }, { code: ":computer:", char: "💻" }
-    ];
+    const emojiAliasOverrides = {
+        "100": "💯",
+        angry: "😠",
+        boom: "💥",
+        check: "✅",
+        computer: "💻",
+        cool: "😎",
+        devil: "😈",
+        evil: "😈",
+        fear: "😨",
+        flex: "💪",
+        haha: "😂",
+        happy: "😄",
+        hmmm: "🤔",
+        mindblown: "🤯",
+        ok: "👌",
+        party: "🥳",
+        praise: "🙌",
+        smile: "😊",
+        thumbsup: "👍"
+    };
+    const emojis = buildEmojiIndex();
+    const emojiByCode = new Map(emojis.map((emoji) => [emoji.code.toLowerCase(), emoji.char]));
 
     const els = {
         status: document.getElementById("status"),
@@ -232,7 +236,7 @@
     }
 
     function sendChatMessage() {
-        const text = els.chatInput.value.trim();
+        const text = expandEmojiShortcodes(els.chatInput.value).trim();
         if (!text) return;
 
         els.chatInput.value = "";
@@ -341,6 +345,39 @@
         els.chatBadge.classList.toggle("hidden", state.unreadCount === 0);
     }
 
+    function buildEmojiIndex() {
+        const byCode = new Map();
+
+        function addEmoji(name, char, terms = []) {
+            if (!name || !char) return;
+            const normalizedName = name.toLowerCase();
+            const code = `:${normalizedName}:`;
+            if (byCode.has(code)) return;
+
+            byCode.set(code, {
+                code,
+                char,
+                searchTerms: [normalizedName, ...terms.map((term) => String(term).toLowerCase())]
+            });
+        }
+
+        for (const [char, aliases, tags, description] of window.VIDCHAT_EMOJI_DATA || []) {
+            for (const alias of aliases || []) {
+                addEmoji(alias, char, [...(tags || []), description || ""]);
+            }
+        }
+
+        for (const [alias, char] of Object.entries(emojiAliasOverrides)) {
+            addEmoji(alias, char);
+        }
+
+        return [...byCode.values()].sort((a, b) => a.code.localeCompare(b.code));
+    }
+
+    function expandEmojiShortcodes(text) {
+        return text.replace(/:([a-z0-9_+\-]+):/gi, (match) => emojiByCode.get(match.toLowerCase()) || match);
+    }
+
     function handleChatInput() {
         const value = els.chatInput.value;
         const lastColonIndex = value.lastIndexOf(":");
@@ -351,7 +388,15 @@
         }
 
         const query = value.slice(lastColonIndex).toLowerCase();
-        const matches = emojis.filter(e => e.code.startsWith(query));
+        if (!/^:[a-z0-9_+\-]*$/.test(query)) {
+            els.emojiAutocomplete.classList.add("hidden");
+            return;
+        }
+
+        const term = query.slice(1);
+        const matches = emojis
+            .filter((emoji) => emoji.code.startsWith(query) || emoji.searchTerms.some((searchTerm) => searchTerm.startsWith(term)))
+            .slice(0, 40);
 
         if (matches.length === 0) {
             els.emojiAutocomplete.classList.add("hidden");
@@ -366,7 +411,13 @@
         matches.forEach((emoji, i) => {
             const div = document.createElement("div");
             div.className = `emoji-option ${i === 0 ? "active" : ""}`;
-            div.innerHTML = `<span class="symbol">${emoji.char}</span> <span class="shortcode">${emoji.code}</span>`;
+            const symbol = document.createElement("span");
+            symbol.className = "symbol";
+            symbol.textContent = emoji.char;
+            const shortcode = document.createElement("span");
+            shortcode.className = "shortcode";
+            shortcode.textContent = emoji.code;
+            div.append(symbol, shortcode);
             div.addEventListener("click", () => {
                 const before = els.chatInput.value.slice(0, index);
                 const after = els.chatInput.value.slice(els.chatInput.selectionStart);
@@ -1502,14 +1553,6 @@
                     {
                         urls: "turns:openrelay.metered.ca:443?transport=tcp",
                         username: "openrelayproject",
-                        credential: "openrelayproject"
-                    }
-                ]
-            }
-        };
-    }
-})();
-",
                         credential: "openrelayproject"
                     }
                 ]

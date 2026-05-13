@@ -665,11 +665,17 @@ button.danger {
 
 .emoji-option .symbol {
     font-size: 1.2rem;
+    flex: 0 0 1.5rem;
+    text-align: center;
 }
 
 .emoji-option .shortcode {
     color: var(--muted);
     font-size: 0.85rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 @media (max-width: 860px) {
