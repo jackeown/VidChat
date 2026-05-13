@@ -435,16 +435,16 @@
         videoButton.addEventListener("click", (event) => {
             event.stopPropagation();
             toggleTracks(stream.getVideoTracks());
-            updateTrackButtons(tile, kind, stream, videoButton, audioButton);
+            updateTrackState(tile, kind, stream, videoButton, audioButton);
         });
         audioButton.addEventListener("click", (event) => {
             event.stopPropagation();
             toggleTracks(stream.getAudioTracks());
-            updateTrackButtons(tile, kind, stream, videoButton, audioButton);
+            updateTrackState(tile, kind, stream, videoButton, audioButton);
         });
 
         tileActions.prepend(videoButton, audioButton);
-        updateTrackButtons(tile, kind, stream, videoButton, audioButton);
+        updateTrackState(tile, kind, stream, videoButton, audioButton);
     }
 
     function toggleTracks(tracks) {
@@ -455,11 +455,12 @@
         });
     }
 
-    function updateTrackButtons(tile, kind, stream, videoButton, audioButton) {
+    function updateTrackState(tile, kind, stream, videoButton, audioButton) {
         const videoTracks = stream.getVideoTracks();
         const audioTracks = stream.getAudioTracks();
         const videoOn = videoTracks.some((track) => track.enabled);
         const audioOn = audioTracks.some((track) => track.enabled);
+        const subtitle = tile.querySelector(".tile-subtitle");
 
         videoButton.textContent = videoTracks.length === 0 ? "No video" : kind === "screen" ? (videoOn ? "Hide" : "Show") : (videoOn ? "Mute video" : "Show video");
         audioButton.textContent = audioTracks.length === 0 ? "No audio" : kind === "screen" ? (audioOn ? "Mute audio" : "Unmute audio") : (audioOn ? "Mute mic" : "Unmute mic");
@@ -469,6 +470,32 @@
         videoButton.disabled = videoTracks.length === 0;
         audioButton.disabled = audioTracks.length === 0;
         tile.classList.toggle("video-muted", !videoOn);
+        if (subtitle) subtitle.textContent = localSubtitle(kind, stream, tile.classList.contains("preview"));
+    }
+
+    function localSubtitle(kind, stream, preview) {
+        const hasVideo = stream.getVideoTracks().length > 0;
+        const hasAudio = stream.getAudioTracks().length > 0;
+        const videoOn = stream.getVideoTracks().some((track) => track.enabled);
+        const audioOn = stream.getAudioTracks().some((track) => track.enabled);
+
+        if (preview) {
+            return "Preview only - not shared";
+        }
+
+        if (kind === "screen") {
+            if (!hasAudio) return videoOn ? "Screen shared without audio" : "Screen hidden, no audio";
+            if (!videoOn && !audioOn) return "Screen and audio muted";
+            if (!videoOn) return "Screen hidden, audio shared";
+            if (!audioOn) return "Screen shared, audio muted";
+            return "Screen and audio shared";
+        }
+
+        if (!hasVideo && !hasAudio) return "No camera or microphone";
+        if (!videoOn && !audioOn) return "Camera and microphone muted";
+        if (!videoOn) return "Camera muted, microphone shared";
+        if (!audioOn) return "Camera shared, microphone muted";
+        return "Camera and microphone shared";
     }
 
     function closeAudioPopovers(exceptTile) {
