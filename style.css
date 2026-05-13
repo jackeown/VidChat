@@ -83,10 +83,10 @@ button.danger {
     width: min(1400px, 100%);
     min-height: 100vh;
     margin: 0 auto;
-    padding: 24px;
+    padding: 18px;
     display: grid;
-    grid-template-rows: auto auto 1fr;
-    gap: 16px;
+    grid-template-rows: auto 1fr;
+    gap: 12px;
 }
 
 .topbar,
@@ -97,19 +97,40 @@ button.danger {
     gap: 16px;
 }
 
+.topbar {
+    padding: 10px 0;
+}
+
+.brand-block {
+    min-width: 170px;
+}
+
 .topbar h1 {
     margin: 0;
-    font-size: clamp(2rem, 5vw, 4.5rem);
+    font-size: clamp(1.55rem, 3.8vw, 3.5rem);
     line-height: 0.95;
     letter-spacing: 0;
 }
 
 .eyebrow {
-    margin: 0 0 6px;
+    margin: 0 0 4px;
     color: var(--accent);
-    font-size: 0.82rem;
+    font-size: 0.74rem;
     font-weight: 700;
     text-transform: uppercase;
+}
+
+.header-controls {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.header-controls button,
+.header-controls .check-control {
+    min-height: 38px;
 }
 
 .room-actions,
@@ -185,10 +206,10 @@ button.danger {
 }
 
 .status {
-    min-height: 20px;
-    margin: 0;
+    min-height: 18px;
+    margin: 4px 0 0;
     color: var(--muted);
-    font-size: 0.9rem;
+    font-size: 0.82rem;
 }
 
 .check-control,
@@ -284,6 +305,16 @@ button.danger {
     object-fit: contain;
 }
 
+.video-tile.preview video {
+    filter: grayscale(1);
+    opacity: 0.58;
+}
+
+.video-tile.video-muted video {
+    filter: grayscale(1);
+    opacity: 0.42;
+}
+
 .tile-bar {
     position: absolute;
     left: 10px;
@@ -299,6 +330,24 @@ button.danger {
     background: rgba(6, 8, 10, 0.78);
     backdrop-filter: blur(10px);
     cursor: move;
+}
+
+.preview-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 12;
+    display: grid;
+    place-content: center;
+    gap: 10px;
+    background: rgba(9, 11, 14, 0.42);
+    color: var(--text);
+    font-weight: 700;
+    text-align: center;
+    pointer-events: none;
+}
+
+.preview-overlay button {
+    pointer-events: auto;
 }
 
 .tile-title,
@@ -323,16 +372,23 @@ button.danger {
     position: relative;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
     flex-shrink: 0;
+    max-width: 58%;
 }
 
 .focus-button,
-.audio-button {
+.audio-button,
+.track-toggle {
     min-height: 34px;
+    padding: 0 10px;
+    font-size: 0.84rem;
 }
 
-.audio-button[disabled] {
+.audio-button[disabled],
+.track-toggle[disabled] {
     cursor: not-allowed;
     opacity: 0.55;
 }
@@ -399,14 +455,18 @@ button.danger {
 
 @media (max-width: 860px) {
     .app-shell {
-        padding: 14px;
+        padding: 12px;
     }
 
     .topbar,
-    .control-panel,
-    .button-group {
+    .control-panel {
         align-items: stretch;
         flex-direction: column;
+    }
+
+    .header-controls {
+        align-items: stretch;
+        justify-content: flex-start;
     }
 
     .room-actions,

@@ -10,41 +10,31 @@
 <body>
     <main class="app-shell">
         <section class="topbar" aria-label="Room controls">
-            <div>
+            <div class="brand-block">
                 <p class="eyebrow">PeerJS room</p>
                 <h1>VidChat</h1>
-            </div>
-            <div class="room-actions">
-                <button id="copyRoomLink" class="primary" type="button" title="Copy room link">Copy room link</button>
-                <button id="newRoom" type="button" title="Start a new room">New room</button>
-            </div>
-        </section>
-
-        <section class="control-panel" aria-label="Call controls">
-            <div class="room-card">
-                <label for="roomId">Room ID</label>
-                <div class="copy-row">
-                    <input id="roomId" type="text" readonly>
-                    <button id="copyRoomId" type="button" title="Copy room ID">Copy</button>
-                </div>
                 <p id="status" class="status">Starting...</p>
             </div>
-
-            <div class="button-group" aria-label="Media controls">
-                <button id="cameraToggle" type="button">Share camera</button>
-                <button id="screenToggle" type="button">Share screen</button>
-                <label class="check-control" title="Include tab or system audio when the browser offers it">
-                    <input id="screenAudio" type="checkbox" checked>
-                    <span>Screen audio</span>
-                </label>
-            </div>
-
-            <div class="layout-controls" aria-label="Layout controls">
-                <span>Layout</span>
-                <div class="segmented">
-                    <button class="layout-button active" type="button" data-layout="grid">Grid</button>
-                    <button class="layout-button" type="button" data-layout="spotlight">Spotlight</button>
-                    <button class="layout-button" type="button" data-layout="filmstrip">Filmstrip</button>
+            <div class="header-controls">
+                <div class="room-actions">
+                    <button id="copyRoomLink" class="primary" type="button" title="Copy room link">Copy room link</button>
+                    <button id="newRoom" type="button" title="Start a new room">New room</button>
+                </div>
+                <div class="button-group" aria-label="Media controls">
+                    <button id="cameraToggle" type="button">Share camera</button>
+                    <button id="screenToggle" type="button">Share screen</button>
+                    <label class="check-control" title="Include tab or system audio when the browser offers it">
+                        <input id="screenAudio" type="checkbox" checked>
+                        <span>Screen audio</span>
+                    </label>
+                </div>
+                <div class="layout-controls" aria-label="Layout controls">
+                    <span>Layout</span>
+                    <div class="segmented">
+                        <button class="layout-button active" type="button" data-layout="grid">Grid</button>
+                        <button class="layout-button" type="button" data-layout="spotlight">Spotlight</button>
+                        <button class="layout-button" type="button" data-layout="filmstrip">Filmstrip</button>
+                    </div>
                 </div>
             </div>
         </section>

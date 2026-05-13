@@ -9,6 +9,7 @@
     const state = {
         peer: null,
         isHost: false,
+        previewStreams: new Map(),
         localStreams: new Map(),
         outboundCalls: new Map(),
         dataConnections: new Map(),
@@ -20,8 +21,6 @@
 
     const els = {
         status: document.getElementById("status"),
-        roomId: document.getElementById("roomId"),
-        copyRoomId: document.getElementById("copyRoomId"),
         copyRoomLink: document.getElementById("copyRoomLink"),
         newRoom: document.getElementById("newRoom"),
         cameraToggle: document.getElementById("cameraToggle"),
@@ -31,11 +30,11 @@
         tileTemplate: document.getElementById("tileTemplate")
     };
 
-    els.roomId.value = roomId;
     updateUrl(roomId);
     bindUi();
     window.addEventListener("resize", keepTilesInsideStage);
     startRoom();
+    startCameraPreview();
 
     async function startRoom() {
         setStatus("Opening room...");
@@ -156,16 +155,63 @@
 
     async function toggleCamera() {
         if (state.localStreams.has("camera")) {
-            stopLocalStream("camera");
+            stopCameraShare();
             return;
         }
 
+        if (!state.previewStreams.has("camera")) {
+            await startCameraPreview();
+            return;
+        }
+
+        shareCameraPreview();
+    }
+
+    async function startCameraPreview() {
+        if (state.previewStreams.has("camera") || state.localStreams.has("camera")) return;
+
+        els.cameraToggle.disabled = true;
+        els.cameraToggle.textContent = "Starting camera...";
+
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            addLocalStream("camera", stream);
+            state.previewStreams.set("camera", stream);
+            addCameraTile(stream, true);
+            setStatus("Camera preview ready. Share it when you want others to see and hear you.");
         } catch (error) {
             setStatus(`Camera error: ${error.message}`);
+        } finally {
+            updateMediaButtons();
         }
+    }
+
+    function shareCameraPreview() {
+        const stream = state.previewStreams.get("camera");
+        if (!stream || state.localStreams.has("camera")) return;
+
+        state.localStreams.set("camera", stream);
+        addCameraTile(stream, false);
+        sendLocalStreamToAll("camera", stream);
+        setStatus("Camera and microphone are now shared.");
+        updateMediaButtons();
+    }
+
+    function stopCameraShare() {
+        if (!state.localStreams.has("camera")) return;
+
+        state.localStreams.delete("camera");
+        closeOutboundCalls("camera");
+        broadcast({ type: "stream-stopped", kind: "camera" });
+
+        const preview = state.previewStreams.get("camera");
+        if (preview) {
+            addCameraTile(preview, true);
+            setStatus("Camera is back to local preview only.");
+        } else {
+            removeTile(tileId("local", "camera"));
+        }
+
+        updateMediaButtons();
     }
 
     async function toggleScreen() {
@@ -202,6 +248,20 @@
         updateMediaButtons();
     }
 
+    function addCameraTile(stream, preview) {
+        addTile({
+            id: tileId("local", "camera"),
+            owner: "You",
+            subtitle: preview ? "Preview only - not shared" : "Camera and microphone shared",
+            kind: "camera",
+            stream,
+            muted: true,
+            local: true,
+            preview,
+            previewAction: shareCameraPreview
+        });
+    }
+
     function stopLocalStream(kind) {
         const stream = state.localStreams.get(kind);
         if (!stream) return;
@@ -210,15 +270,19 @@
         state.localStreams.delete(kind);
         removeTile(tileId("local", kind));
 
+        closeOutboundCalls(kind);
+
+        broadcast({ type: "stream-stopped", kind });
+        updateMediaButtons();
+    }
+
+    function closeOutboundCalls(kind) {
         for (const [key, call] of state.outboundCalls) {
             if (key.startsWith(`${kind}:`)) {
                 call.close();
                 state.outboundCalls.delete(key);
             }
         }
-
-        broadcast({ type: "stream-stopped", kind });
-        updateMediaButtons();
     }
 
     function sendLocalStreamToAll(kind, stream) {
@@ -268,6 +332,15 @@
     }
 
     function addTile(config) {
+        const oldTile = state.tiles.get(config.id);
+        const oldFrame = oldTile ? {
+            x: oldTile.offsetLeft,
+            y: oldTile.offsetTop,
+            width: oldTile.offsetWidth,
+            height: oldTile.offsetHeight,
+            placed: oldTile.dataset.placed === "true"
+        } : null;
+
         removeTile(config.id);
 
         const fragment = els.tileTemplate.content.cloneNode(true);
@@ -275,6 +348,7 @@
         const video = fragment.querySelector("video");
         const title = fragment.querySelector(".tile-title");
         const subtitle = fragment.querySelector(".tile-subtitle");
+        const tileActions = fragment.querySelector(".tile-actions");
         const focusButton = fragment.querySelector(".focus-button");
         const audioButton = fragment.querySelector(".audio-button");
         const audioPopover = fragment.querySelector(".audio-popover");
@@ -283,6 +357,7 @@
 
         tile.dataset.tileId = config.id;
         tile.classList.add(config.kind);
+        tile.classList.toggle("preview", Boolean(config.preview));
         tile.style.zIndex = String(++state.zIndex);
         title.textContent = `${config.owner} - ${config.kind === "screen" ? "Screen" : "Camera"}`;
         subtitle.textContent = config.subtitle;
@@ -292,6 +367,10 @@
         resizeHandle.className = "resize-handle";
         resizeHandle.title = "Resize video";
         resizeHandle.setAttribute("aria-hidden", "true");
+
+        if (config.local) {
+            addLocalMuteControls(tileActions, tile, config.kind, config.stream);
+        }
 
         volume.disabled = config.local;
         audioButton.disabled = config.local;
@@ -314,11 +393,82 @@
         bindTileDragging(tile, fragment.querySelector(".tile-bar"));
         bindTileResizing(tile, resizeHandle);
 
+        if (config.preview) {
+            const previewOverlay = document.createElement("div");
+            const previewText = document.createElement("span");
+            const previewButton = document.createElement("button");
+
+            previewOverlay.className = "preview-overlay";
+            previewText.textContent = "Preview only";
+            previewButton.type = "button";
+            previewButton.className = "primary";
+            previewButton.textContent = "Share camera";
+            previewButton.addEventListener("click", (event) => {
+                event.stopPropagation();
+                config.previewAction();
+            });
+
+            previewOverlay.append(previewText, previewButton);
+            tile.appendChild(previewOverlay);
+        }
+
         tile.appendChild(resizeHandle);
         els.videos.appendChild(fragment);
         state.tiles.set(config.id, tile);
-        arrangeTiles(state.layout, false);
+        if (oldFrame && oldFrame.placed) {
+            setTileFrame(tile, oldFrame.x, oldFrame.y, oldFrame.width, oldFrame.height);
+        } else {
+            arrangeTiles(state.layout, false);
+        }
         applyFocus();
+    }
+
+    function addLocalMuteControls(tileActions, tile, kind, stream) {
+        const videoButton = document.createElement("button");
+        const audioButton = document.createElement("button");
+
+        videoButton.type = "button";
+        audioButton.type = "button";
+        videoButton.className = "track-toggle";
+        audioButton.className = "track-toggle";
+
+        videoButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleTracks(stream.getVideoTracks());
+            updateTrackButtons(tile, kind, stream, videoButton, audioButton);
+        });
+        audioButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleTracks(stream.getAudioTracks());
+            updateTrackButtons(tile, kind, stream, videoButton, audioButton);
+        });
+
+        tileActions.prepend(videoButton, audioButton);
+        updateTrackButtons(tile, kind, stream, videoButton, audioButton);
+    }
+
+    function toggleTracks(tracks) {
+        if (!tracks.length) return;
+        const nextEnabled = !tracks.some((track) => track.enabled);
+        tracks.forEach((track) => {
+            track.enabled = nextEnabled;
+        });
+    }
+
+    function updateTrackButtons(tile, kind, stream, videoButton, audioButton) {
+        const videoTracks = stream.getVideoTracks();
+        const audioTracks = stream.getAudioTracks();
+        const videoOn = videoTracks.some((track) => track.enabled);
+        const audioOn = audioTracks.some((track) => track.enabled);
+
+        videoButton.textContent = videoTracks.length === 0 ? "No video" : kind === "screen" ? (videoOn ? "Hide" : "Show") : (videoOn ? "Mute video" : "Show video");
+        audioButton.textContent = audioTracks.length === 0 ? "No audio" : kind === "screen" ? (audioOn ? "Mute audio" : "Unmute audio") : (audioOn ? "Mute mic" : "Unmute mic");
+
+        videoButton.classList.toggle("danger", videoOn);
+        audioButton.classList.toggle("danger", audioOn);
+        videoButton.disabled = videoTracks.length === 0;
+        audioButton.disabled = audioTracks.length === 0;
+        tile.classList.toggle("video-muted", !videoOn);
     }
 
     function closeAudioPopovers(exceptTile) {
@@ -566,7 +716,6 @@
     }
 
     function bindUi() {
-        els.copyRoomId.addEventListener("click", () => copyText(roomId, "Room ID copied."));
         els.copyRoomLink.addEventListener("click", () => copyText(roomUrl(roomId), "Room link copied."));
         els.newRoom.addEventListener("click", () => {
             window.location.href = roomUrl(createRoomId());
@@ -583,8 +732,10 @@
 
     function updateMediaButtons() {
         const cameraOn = state.localStreams.has("camera");
+        const cameraPreview = state.previewStreams.has("camera");
         const screenOn = state.localStreams.has("screen");
-        els.cameraToggle.textContent = cameraOn ? "Stop camera" : "Share camera";
+        els.cameraToggle.disabled = false;
+        els.cameraToggle.textContent = cameraOn ? "Stop camera" : cameraPreview ? "Share camera" : "Start camera";
         els.cameraToggle.classList.toggle("danger", cameraOn);
         els.screenToggle.textContent = screenOn ? "Stop screen" : "Share screen";
         els.screenToggle.classList.toggle("danger", screenOn);
@@ -602,8 +753,7 @@
             await navigator.clipboard.writeText(text);
             setStatus(message);
         } catch (error) {
-            els.roomId.select();
-            setStatus("Copy failed. Select the room ID manually.");
+            setStatus("Copy failed. Use the URL in the address bar.");
         }
     }
 
