@@ -17,12 +17,39 @@
         tiles: new Map(),
         tileConfigs: new Map(),
         displayName: ensureDisplayName(),
+        chatName: localStorage.getItem("vidChatChatName") || "MeliChat",
+        bgColor: localStorage.getItem("vidChatBgColor") || "#000000",
+        bgImage: localStorage.getItem("vidChatBgImage") || "",
+        accentColor: localStorage.getItem("vidChatAccentColor") || "#ff7ac8",
         layout: "grid",
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
         focusedTileId: null,
-        zIndex: 1
+        zIndex: 1,
+        unreadCount: 0,
+        chatOpen: false,
+        chatHistory: []
     };
+
+    const emojis = [
+        { code: ":smile:", char: "😊" }, { code: ":haha:", char: "😂" }, { code: ":happy:", char: "😄" },
+        { code: ":wink:", char: "😉" }, { code: ":heart:", char: "❤️" }, { code: ":thumbsup:", char: "👍" },
+        { code: ":rocket:", char: "🚀" }, { code: ":party:", char: "🥳" }, { code: ":thinking:", char: "🤔" },
+        { code: ":fire:", char: "🔥" }, { code: ":eyes:", char: "👀" }, { code: ":ok:", char: "👌" },
+        { code: ":clap:", char: "👏" }, { code: ":check:", char: "✅" }, { code: ":star:", char: "⭐" },
+        { code: ":cool:", char: "😎" }, { code: ":cry:", char: "😢" }, { code: ":angry:", char: "😠" },
+        { code: ":mindblown:", char: "🤯" }, { code: ":sleeping:", char: "😴" }, { code: ":sob:", char: "😭" },
+        { code: ":blush:", char: "😊" }, { code: ":yum:", char: "😋" }, { code: ":sunglasses:", char: "😎" },
+        { code: ":smirk:", char: "😏" }, { code: ":neutral:", char: "😐" }, { code: ":expressionless:", char: "😑" },
+        { code: ":hmmm:", char: "🤔" }, { code: ":pensive:", char: "😔" }, { code: ":confused:", char: "😕" },
+        { code: ":fear:", char: "😨" }, { code: ":weary:", char: "😩" }, { code: ":triumph:", char: "😤" },
+        { code: ":boom:", char: "💥" }, { code: ":100:", char: "💯" }, { code: ":praise:", char: "🙌" },
+        { code: ":wave:", char: "👋" }, { code: ":pray:", char: "🙏" }, { code: ":flex:", char: "💪" },
+        { code: ":sparkles:", char: "✨" }, { code: ":cloud:", char: "☁️" }, { code: ":sun:", char: "☀️" },
+        { code: ":moon:", char: "🌙" }, { code: ":cat:", char: "🐱" }, { code: ":dog:", char: "🐶" },
+        { code: ":pizza:", char: "🍕" }, { code: ":beer:", char: "🍺" }, { code: ":coffee:", char: "☕" },
+        { code: ":gift:", char: "🎁" }, { code: ":money:", char: "💰" }, { code: ":computer:", char: "💻" }
+    ];
 
     const els = {
         status: document.getElementById("status"),
@@ -30,10 +57,25 @@
         newRoom: document.getElementById("newRoom"),
         cameraToggle: document.getElementById("cameraToggle"),
         screenToggle: document.getElementById("screenToggle"),
-        screenAudio: document.getElementById("screenAudio"),
+        screenAudioMute: document.getElementById("screenAudioMute"),
+        openChat: document.getElementById("openChat"),
+        chatBadge: document.getElementById("chatBadge"),
+        chatModal: document.getElementById("chatModal"),
+        chatHistory: document.getElementById("chatHistory"),
+        chatInput: document.getElementById("chatInput"),
+        sendChat: document.getElementById("sendChat"),
+        attachFile: document.getElementById("attachFile"),
+        fileInput: document.getElementById("fileInput"),
+        emojiAutocomplete: document.getElementById("emojiAutocomplete"),
         appSettingsButton: document.getElementById("appSettingsButton"),
         appSettingsModal: document.getElementById("appSettingsModal"),
         displayName: document.getElementById("displayName"),
+        brandName: document.getElementById("brandName"),
+        chatNameInput: document.getElementById("chatNameInput"),
+        bgColorInput: document.getElementById("bgColorInput"),
+        bgImageInput: document.getElementById("bgImageInput"),
+        clearBgImage: document.getElementById("clearBgImage"),
+        accentColorInput: document.getElementById("accentColorInput"),
         mirrorLocalCamera: document.getElementById("mirrorLocalCamera"),
         feedModal: document.getElementById("feedModal"),
         feedModalTitle: document.getElementById("feedModalTitle"),
@@ -46,10 +88,11 @@
     updateUrl(roomId);
     applyVideoFit();
     applyMirrorSetting();
+    applyTheme();
+    applyChatName();
     bindUi();
     window.addEventListener("resize", keepTilesInsideStage);
     startRoom();
-    startCameraPreview();
 
     async function startRoom() {
         setStatus("Opening room...");
@@ -109,7 +152,7 @@
 
             if (state.isHost) {
                 const roster = [...state.dataConnections.keys()].filter((id) => id !== conn.peer);
-                conn.send({ type: "welcome", roomId, peers: roster });
+                conn.send({ type: "welcome", roomId, peers: roster, history: state.chatHistory });
                 broadcast({ type: "peer-joined", peerId: conn.peer }, conn.peer);
             }
 
@@ -147,6 +190,15 @@
         if (message.type === "welcome") {
             setStatus(`Joined room ${message.roomId}. Connecting to ${message.peers.length} peer(s).`);
             message.peers.forEach((id) => connectData(id, false));
+            if (message.history) {
+                message.history.forEach((msg) => {
+                    if (msg.type === "chat") {
+                        addChatMessage(msg.peerId, msg.text, msg.timestamp);
+                    } else if (msg.type === "file") {
+                        addFileMessage(msg.peerId, msg.name, msg.size, msg.data, msg.timestamp);
+                    }
+                });
+            }
             return;
         }
 
@@ -169,6 +221,171 @@
         if (message.type === "name-changed") {
             setPeerName(peerId, message.displayName);
         }
+
+        if (message.type === "chat") {
+            addChatMessage(peerId, message.text, message.timestamp);
+        }
+
+        if (message.type === "file") {
+            addFileMessage(peerId, message.name, message.size, message.data, message.timestamp);
+        }
+    }
+
+    function sendChatMessage() {
+        const text = els.chatInput.value.trim();
+        if (!text) return;
+
+        els.chatInput.value = "";
+        els.emojiAutocomplete.classList.add("hidden");
+        const msg = { type: "chat", text, timestamp: Date.now() };
+        addChatMessage("local", msg.text, msg.timestamp);
+        broadcast(msg);
+    }
+
+    function addChatMessage(peerId, text, timestamp) {
+        const local = peerId === "local";
+        const author = local ? state.displayName : (state.peerNames.get(peerId) || shortPeer(peerId));
+        const timeStr = new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        
+        const messageEl = document.createElement("div");
+        messageEl.className = `chat-message ${local ? "local" : ""}`;
+        
+        const authorEl = document.createElement("span");
+        authorEl.className = "author";
+        authorEl.textContent = author;
+        
+        const timeEl = document.createElement("span");
+        timeEl.className = "timestamp";
+        timeEl.textContent = timeStr;
+        authorEl.appendChild(timeEl);
+        
+        const contentEl = document.createElement("div");
+        contentEl.className = "content";
+        // Convert URLs to clickable links safely
+        contentEl.innerHTML = linkify(text);
+        
+        messageEl.append(authorEl, contentEl);
+        els.chatHistory.appendChild(messageEl);
+        els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
+
+        state.chatHistory.push({ peerId, author, text, timestamp, type: "chat" });
+
+        if (!local && !state.chatOpen) {
+            state.unreadCount++;
+            updateChatBadge();
+        }
+    }
+
+    function linkify(text) {
+        // Escape HTML to prevent XSS before adding our own <a> tags
+        const div = document.createElement("div");
+        div.textContent = text;
+        const escapedText = div.innerHTML;
+
+        const urlPattern = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
+        return escapedText.replace(urlPattern, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+    }
+
+    function addFileMessage(peerId, name, size, data, timestamp) {
+        const local = peerId === "local";
+        const author = local ? state.displayName : (state.peerNames.get(peerId) || shortPeer(peerId));
+        const timeStr = new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        
+        const messageEl = document.createElement("div");
+        messageEl.className = `chat-message ${local ? "local" : ""}`;
+        
+        const authorEl = document.createElement("span");
+        authorEl.className = "author";
+        authorEl.textContent = author;
+        
+        const timeEl = document.createElement("span");
+        timeEl.className = "timestamp";
+        timeEl.textContent = timeStr;
+        authorEl.appendChild(timeEl);
+        
+        const contentEl = document.createElement("div");
+        contentEl.className = "content";
+        
+        const blob = data instanceof Blob ? data : new Blob([data]);
+        const url = URL.createObjectURL(blob);
+        
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = name;
+        link.className = "file-link";
+        link.innerHTML = `<span>📁 ${name}</span> <span class="file-info">(${formatBytes(size)})</span>`;
+        
+        contentEl.appendChild(link);
+        messageEl.append(authorEl, contentEl);
+        els.chatHistory.appendChild(messageEl);
+        els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
+
+        state.chatHistory.push({ peerId, author, name, size, data, timestamp, type: "file" });
+
+        if (!local && !state.chatOpen) {
+            state.unreadCount++;
+            updateChatBadge();
+        }
+    }
+
+    function formatBytes(bytes) {
+        if (bytes === 0) return "0 Bytes";
+        const k = 1024;
+        const sizes = ["Bytes", "KB", "MB", "GB"];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    }
+
+    function updateChatBadge() {
+        els.chatBadge.textContent = state.unreadCount;
+        els.chatBadge.classList.toggle("hidden", state.unreadCount === 0);
+    }
+
+    function handleChatInput() {
+        const value = els.chatInput.value;
+        const lastColonIndex = value.lastIndexOf(":");
+        
+        if (lastColonIndex === -1 || lastColonIndex < value.lastIndexOf(" ")) {
+            els.emojiAutocomplete.classList.add("hidden");
+            return;
+        }
+
+        const query = value.slice(lastColonIndex).toLowerCase();
+        const matches = emojis.filter(e => e.code.startsWith(query));
+
+        if (matches.length === 0) {
+            els.emojiAutocomplete.classList.add("hidden");
+            return;
+        }
+
+        renderEmojiAutocomplete(matches, lastColonIndex);
+    }
+
+    function renderEmojiAutocomplete(matches, index) {
+        els.emojiAutocomplete.replaceChildren();
+        matches.forEach((emoji, i) => {
+            const div = document.createElement("div");
+            div.className = `emoji-option ${i === 0 ? "active" : ""}`;
+            div.innerHTML = `<span class="symbol">${emoji.char}</span> <span class="shortcode">${emoji.code}</span>`;
+            div.addEventListener("click", () => {
+                const before = els.chatInput.value.slice(0, index);
+                const after = els.chatInput.value.slice(els.chatInput.selectionStart);
+                els.chatInput.value = before + emoji.char + " " + after;
+                els.emojiAutocomplete.classList.add("hidden");
+                els.chatInput.focus();
+            });
+            els.emojiAutocomplete.appendChild(div);
+        });
+        els.emojiAutocomplete.classList.remove("hidden");
+    }
+
+    function moveAutocompleteSelection(dir) {
+        const options = [...els.emojiAutocomplete.querySelectorAll(".emoji-option")];
+        const activeIndex = options.findIndex(o => o.classList.contains("active"));
+        const nextIndex = (activeIndex + dir + options.length) % options.length;
+        options.forEach(o => o.classList.remove("active"));
+        options[nextIndex].classList.add("active");
+        options[nextIndex].scrollIntoView({ block: "nearest" });
     }
 
     function connectData(peerId, required) {
@@ -182,30 +399,24 @@
     }
 
     async function toggleCamera() {
-        if (state.localStreams.has("camera")) {
-            stopCameraShare();
+        if (state.localStreams.has("camera") || state.previewStreams.has("camera")) {
+            stopFullCamera();
             return;
         }
 
-        if (!state.previewStreams.has("camera")) {
-            await startCameraPreview();
-            return;
-        }
-
-        shareCameraPreview();
+        await startAndShareCamera();
     }
 
-    async function startCameraPreview() {
-        if (state.previewStreams.has("camera") || state.localStreams.has("camera")) return;
-
+    async function startAndShareCamera() {
         els.cameraToggle.disabled = true;
-        els.cameraToggle.textContent = "Starting camera...";
+        els.cameraToggle.textContent = "Starting...";
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            state.previewStreams.set("camera", stream);
-            addCameraTile(stream, true);
-            setStatus("Camera preview ready. Share it when you want others to see and hear you.");
+            state.localStreams.set("camera", stream);
+            addCameraTile(stream, false);
+            sendLocalStreamToAll("camera", stream);
+            setStatus("Camera and microphone are now shared.");
         } catch (error) {
             setStatus(`Camera error: ${error.message}`);
         } finally {
@@ -213,32 +424,20 @@
         }
     }
 
-    function shareCameraPreview() {
-        const stream = state.previewStreams.get("camera");
-        if (!stream || state.localStreams.has("camera")) return;
-
-        state.localStreams.set("camera", stream);
-        addCameraTile(stream, false);
-        sendLocalStreamToAll("camera", stream);
-        setStatus("Camera and microphone are now shared.");
-        updateMediaButtons();
-    }
-
-    function stopCameraShare() {
-        if (!state.localStreams.has("camera")) return;
-
-        state.localStreams.delete("camera");
-        closeOutboundCalls("camera");
-        broadcast({ type: "stream-stopped", kind: "camera" });
-
-        const preview = state.previewStreams.get("camera");
-        if (preview) {
-            addCameraTile(preview, true);
-            setStatus("Camera is back to local preview only.");
-        } else {
-            removeTile(tileId("local", "camera"));
+    function stopFullCamera() {
+        const stream = state.localStreams.get("camera") || state.previewStreams.get("camera");
+        if (stream) {
+            stream.getTracks().forEach((track) => track.stop());
         }
 
+        state.localStreams.delete("camera");
+        state.previewStreams.delete("camera");
+        removeTile(tileId("local", "camera"));
+
+        closeOutboundCalls("camera");
+        broadcast({ type: "stream-stopped", kind: "camera" });
+        
+        setStatus("You are now spectating.");
         updateMediaButtons();
     }
 
@@ -251,7 +450,7 @@
         try {
             const stream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
-                audio: els.screenAudio.checked
+                audio: true
             });
             addLocalStream("screen", stream);
             stream.getVideoTracks()[0].addEventListener("ended", () => stopLocalStream("screen"));
@@ -285,8 +484,7 @@
             stream,
             muted: true,
             local: true,
-            preview,
-            previewAction: shareCameraPreview
+            preview
         });
     }
 
@@ -390,6 +588,7 @@
         title.textContent = tileTitle(config);
         video.srcObject = config.stream;
         video.muted = config.muted;
+        tile.classList.toggle("audio-muted", config.stream.getAudioTracks().length > 0 && !config.stream.getAudioTracks().some(t => t.enabled));
         resizeHandle.className = "resize-handle";
         resizeHandle.title = "Resize video";
         resizeHandle.setAttribute("aria-hidden", "true");
@@ -471,6 +670,12 @@
         videoButton.disabled = videoTracks.length === 0;
         audioButton.disabled = audioTracks.length === 0;
         updateLocalTileState(config.id);
+        
+        const tile = state.tiles.get(config.id);
+        if (tile) {
+            tile.classList.toggle("audio-muted", !audioOn);
+        }
+
         updateFeedModalSubtitle(config);
     }
 
@@ -594,13 +799,28 @@
     }
 
     function toggleTileExpanded(tile) {
-        const alreadyExpanded = tile.classList.contains("expanded");
-        for (const other of state.tiles.values()) {
-            other.classList.remove("expanded");
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else {
+            tile.requestFullscreen().catch((err) => {
+                console.error(`Error attempting to enable full-screen mode: ${err.message}`);
+                // Fallback to CSS expanded mode if requestFullscreen fails
+                const alreadyExpanded = tile.classList.contains("expanded");
+                for (const other of state.tiles.values()) {
+                    other.classList.remove("expanded");
+                }
+                tile.classList.toggle("expanded", !alreadyExpanded);
+                if (!alreadyExpanded) bringToFront(tile);
+            });
         }
-        tile.classList.toggle("expanded", !alreadyExpanded);
-        if (!alreadyExpanded) bringToFront(tile);
     }
+
+    document.addEventListener("fullscreenchange", () => {
+        const full = document.fullscreenElement;
+        for (const tile of state.tiles.values()) {
+            tile.classList.toggle("expanded", tile === full);
+        }
+    });
 
     function applyFocus() {
         for (const [id, tile] of state.tiles) {
@@ -721,6 +941,9 @@
             event.preventDefault();
 
             const start = pointerState(event, tile);
+            let home = { x: start.x, y: start.y, width: start.width, height: start.height };
+            let hasSwapped = false;
+            
             bringToFront(tile);
             tile.classList.add("moving");
             els.videos.classList.add("dragging");
@@ -729,14 +952,40 @@
             const move = (moveEvent) => {
                 const dx = moveEvent.clientX - start.clientX;
                 const dy = moveEvent.clientY - start.clientY;
-                setTileFrame(tile, start.x + dx, start.y + dy, start.width, start.height);
+                const nextX = start.x + dx;
+                const nextY = start.y + dy;
+                
+                const centerX = nextX + start.width / 2;
+                const centerY = nextY + start.height / 2;
+                
+                for (const other of state.tiles.values()) {
+                    if (other === tile) continue;
+                    const otherFrame = currentFrame(other);
+                    
+                    if (centerX > otherFrame.x && centerX < otherFrame.x + otherFrame.width &&
+                        centerY > otherFrame.y && centerY < otherFrame.y + otherFrame.height) {
+                        
+                        const targetFrame = { ...otherFrame };
+                        setTileFrame(other, home.x, home.y, home.width, home.height, false);
+                        home = targetFrame;
+                        hasSwapped = true;
+                        break;
+                    }
+                }
+
+                setTileFrame(tile, nextX, nextY, start.width, start.height, false);
             };
+
             const stop = () => {
                 tile.classList.remove("moving");
                 els.videos.classList.remove("dragging");
                 handle.removeEventListener("pointermove", move);
                 handle.removeEventListener("pointerup", stop);
                 handle.removeEventListener("pointercancel", stop);
+                
+                if (hasSwapped) {
+                    setTileFrame(tile, home.x, home.y, home.width, home.height, false);
+                }
             };
 
             handle.addEventListener("pointermove", move);
@@ -802,6 +1051,15 @@
             frame = currentFrame(tile, stage);
         }
 
+        const id = tile.dataset.tileId;
+        if (id && state.tileConfigs.has(id)) {
+            const cfg = state.tileConfigs.get(id);
+            cfg.x = frame.x;
+            cfg.y = frame.y;
+            cfg.width = frame.width;
+            cfg.height = frame.height;
+        }
+
         tile.style.left = `${frame.x}px`;
         tile.style.top = `${frame.y}px`;
         tile.style.width = `${frame.width}px`;
@@ -834,6 +1092,13 @@
     }
 
     function currentFrame(tile, stage = stageRect()) {
+        const id = tile.dataset.tileId;
+        const cfg = id ? state.tileConfigs.get(id) : null;
+        
+        if (cfg && typeof cfg.x === "number") {
+            return { x: cfg.x, y: cfg.y, width: cfg.width, height: cfg.height };
+        }
+
         const width = clamp(tile.offsetWidth || 120, 120, Math.max(120, stage.width));
         const height = clamp(tile.offsetHeight || 90, 90, Math.max(90, stage.height));
         return {
@@ -895,6 +1160,7 @@
         });
         els.cameraToggle.addEventListener("click", toggleCamera);
         els.screenToggle.addEventListener("click", toggleScreen);
+        els.screenAudioMute.addEventListener("click", toggleScreenAudioMute);
         els.appSettingsButton.addEventListener("click", () => els.appSettingsModal.showModal());
         els.displayName.value = state.displayName;
         els.displayName.addEventListener("change", () => updateDisplayName(els.displayName.value));
@@ -905,6 +1171,48 @@
                 els.displayName.blur();
             }
         });
+
+        els.chatNameInput.value = state.chatName;
+        els.chatNameInput.addEventListener("input", () => {
+            state.chatName = els.chatNameInput.value || "MeliChat";
+            localStorage.setItem("vidChatChatName", state.chatName);
+            applyChatName();
+        });
+
+        els.bgColorInput.value = state.bgColor;
+        els.bgColorInput.addEventListener("input", () => {
+            state.bgColor = els.bgColorInput.value;
+            localStorage.setItem("vidChatBgColor", state.bgColor);
+            applyTheme();
+        });
+
+        els.bgImageInput.addEventListener("change", (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                state.bgImage = e.target.result;
+                localStorage.setItem("vidChatBgImage", state.bgImage);
+                applyTheme();
+            };
+            reader.readAsDataURL(file);
+        });
+
+        els.clearBgImage.addEventListener("click", () => {
+            state.bgImage = "";
+            localStorage.removeItem("vidChatBgImage");
+            els.bgImageInput.value = "";
+            applyTheme();
+        });
+
+        els.accentColorInput.value = state.accentColor;
+        els.accentColorInput.addEventListener("input", () => {
+            state.accentColor = els.accentColorInput.value;
+            localStorage.setItem("vidChatAccentColor", state.accentColor);
+            applyTheme();
+        });
+
         els.mirrorLocalCamera.checked = state.mirrorLocalCamera;
         els.mirrorLocalCamera.addEventListener("change", () => {
             state.mirrorLocalCamera = els.mirrorLocalCamera.checked;
@@ -923,6 +1231,81 @@
         document.querySelectorAll(".layout-button").forEach((button) => {
             button.addEventListener("click", () => setLayout(button.dataset.layout));
         });
+
+        els.openChat.addEventListener("click", () => {
+            state.chatOpen = true;
+            state.unreadCount = 0;
+            updateChatBadge();
+            els.chatModal.showModal();
+            els.chatInput.focus();
+        });
+
+        els.chatModal.addEventListener("close", () => {
+            state.chatOpen = false;
+        });
+
+        els.attachFile.addEventListener("click", () => els.fileInput.click());
+        els.fileInput.addEventListener("change", (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const msg = {
+                    type: "file",
+                    name: file.name,
+                    size: file.size,
+                    data: e.target.result,
+                    timestamp: Date.now()
+                };
+                addFileMessage("local", msg.name, msg.size, msg.data, msg.timestamp);
+                broadcast(msg);
+                els.fileInput.value = "";
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        els.sendChat.addEventListener("click", sendChatMessage);
+        els.chatInput.addEventListener("keydown", (event) => {
+            const autocompleteVisible = !els.emojiAutocomplete.classList.contains("hidden");
+
+            if (event.key === "Escape" && autocompleteVisible) {
+                els.emojiAutocomplete.classList.add("hidden");
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+
+            if ((event.key === "Enter" || event.key === "Tab") && autocompleteVisible) {
+                const active = els.emojiAutocomplete.querySelector(".active");
+                if (active) {
+                    active.click();
+                    event.preventDefault();
+                    return;
+                }
+            }
+            if (event.key === "Enter") {
+                event.preventDefault();
+                sendChatMessage();
+            }
+            if (event.key === "ArrowDown" && autocompleteVisible) {
+                moveAutocompleteSelection(1);
+                event.preventDefault();
+            }
+            if (event.key === "ArrowUp" && autocompleteVisible) {
+                moveAutocompleteSelection(-1);
+                event.preventDefault();
+            }
+        });
+
+        els.chatInput.addEventListener("input", handleChatInput);
+
+        document.addEventListener("pointerdown", (event) => {
+            if (!event.target.closest(".autocomplete-wrapper")) {
+                els.emojiAutocomplete.classList.add("hidden");
+            }
+        });
+
         document.addEventListener("keydown", (event) => {
             if (event.key !== "Escape") return;
             for (const tile of state.tiles.values()) {
@@ -939,16 +1322,52 @@
         els.videos.classList.toggle("mirror-local-camera", state.mirrorLocalCamera);
     }
 
+    function applyChatName() {
+        els.brandName.textContent = state.chatName;
+        document.title = state.chatName;
+    }
+
+    function applyTheme() {
+        document.documentElement.style.setProperty("--bg", state.bgColor);
+        document.documentElement.style.setProperty("--bg-image", state.bgImage ? `url(${state.bgImage})` : "none");
+        document.documentElement.style.setProperty("--accent", state.accentColor);
+    }
+
+    function toggleScreenAudioMute() {
+        const stream = state.localStreams.get("screen");
+        if (!stream) return;
+
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length === 0) return;
+
+        const nextEnabled = !audioTracks.some(t => t.enabled);
+        audioTracks.forEach(t => t.enabled = nextEnabled);
+        
+        const tile = state.tiles.get(tileId("local", "screen"));
+        if (tile) {
+            tile.classList.toggle("audio-muted", !nextEnabled);
+        }
+        
+        updateMediaButtons();
+    }
+
     function updateMediaButtons() {
-        const cameraOn = state.localStreams.has("camera");
-        const cameraPreview = state.previewStreams.has("camera");
+        const hasCamera = state.localStreams.has("camera") || state.previewStreams.has("camera");
         const screenOn = state.localStreams.has("screen");
+        const screenStream = state.localStreams.get("screen");
+        const hasScreenAudio = screenStream && screenStream.getAudioTracks().length > 0;
+        const screenAudioMuted = hasScreenAudio && !screenStream.getAudioTracks().some(t => t.enabled);
+
         els.cameraToggle.disabled = false;
-        els.cameraToggle.textContent = cameraOn ? "Stop camera" : cameraPreview ? "Share camera" : "Start camera";
-        els.cameraToggle.classList.toggle("danger", cameraOn);
+        els.cameraToggle.textContent = hasCamera ? "Remove Video" : "Share Camera/Mic";
+        els.cameraToggle.classList.toggle("danger", hasCamera);
+        
         els.screenToggle.textContent = screenOn ? "Stop screen" : "Share screen";
         els.screenToggle.classList.toggle("danger", screenOn);
-        els.screenAudio.disabled = screenOn;
+
+        els.screenAudioMute.classList.toggle("hidden", !screenOn || !hasScreenAudio);
+        els.screenAudioMute.textContent = screenAudioMuted ? "Unmute Screen" : "Mute Screen";
+        els.screenAudioMute.classList.toggle("danger", !screenAudioMuted && hasScreenAudio);
     }
 
     function updateDisplayName(value) {
@@ -1063,7 +1482,38 @@
 
     function peerOptions() {
         return {
-            debug: 1
+            debug: 1,
+            config: {
+                iceServers: [
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "stun:stun1.l.google.com:19302" },
+                    { urls: "stun:stun2.l.google.com:19302" },
+                    { urls: "stun:stun.services.mozilla.com" },
+                    {
+                        urls: "turn:openrelay.metered.ca:80",
+                        username: "openrelayproject",
+                        credential: "openrelayproject"
+                    },
+                    {
+                        urls: "turn:openrelay.metered.ca:443",
+                        username: "openrelayproject",
+                        credential: "openrelayproject"
+                    },
+                    {
+                        urls: "turns:openrelay.metered.ca:443?transport=tcp",
+                        username: "openrelayproject",
+                        credential: "openrelayproject"
+                    }
+                ]
+            }
+        };
+    }
+})();
+",
+                        credential: "openrelayproject"
+                    }
+                ]
+            }
         };
     }
 })();

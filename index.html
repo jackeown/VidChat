@@ -12,7 +12,7 @@
         <section class="topbar" aria-label="Room controls">
             <div class="brand-block">
                 <p class="eyebrow">Peer-to-peer Chat Room</p>
-                <h1>MeliChat</h1>
+                <h1 id="brandName">MeliChat</h1>
                 <p id="status" class="status">Starting...</p>
             </div>
             <div class="header-controls">
@@ -23,10 +23,7 @@
                 <div class="button-group" aria-label="Media controls">
                     <button id="cameraToggle" type="button">Share camera</button>
                     <button id="screenToggle" type="button">Share screen</button>
-                    <label class="check-control" title="Include tab or system audio when the browser offers it">
-                        <input id="screenAudio" type="checkbox" checked>
-                        <span>Screen audio</span>
-                    </label>
+                    <button id="screenAudioMute" type="button" class="hidden">Mute Screen</button>
                 </div>
                 <div class="layout-controls" aria-label="Layout controls">
                     <span>Layout</span>
@@ -35,6 +32,10 @@
                         <button class="layout-button" type="button" data-layout="spotlight">Spotlight</button>
                         <button class="layout-button" type="button" data-layout="filmstrip">Filmstrip</button>
                     </div>
+                    <button id="openChat" type="button" title="Open chat" aria-label="Open chat" class="relative">
+                        <span>💬 Chat</span>
+                        <span id="chatBadge" class="chat-badge hidden">0</span>
+                    </button>
                     <button id="appSettingsButton" type="button" title="Open settings" aria-label="Open settings">⚙</button>
                 </div>
             </div>
@@ -49,9 +50,32 @@
             <div class="tile-chip">
                 <strong class="tile-title"></strong>
             </div>
+            <div class="mute-icon" title="Microphone muted">🔇</div>
             <button class="tile-settings-button" type="button" title="Open feed settings">⚙</button>
         </article>
     </template>
+
+    <dialog id="chatModal" class="modal chat-modal">
+        <form method="dialog" class="modal-panel chat-panel">
+            <div class="modal-header">
+                <div>
+                    <h2>Chat</h2>
+                    <p>Message the room</p>
+                </div>
+                <button value="close" type="submit" title="Close">Close</button>
+            </div>
+            <div id="chatHistory" class="chat-history"></div>
+            <div class="chat-input-row">
+                <button id="attachFile" type="button" title="Send a file">🔗</button>
+                <input id="fileInput" type="file" class="hidden">
+                <div class="autocomplete-wrapper">
+                    <input id="chatInput" type="text" placeholder="Type a message... (use : for emojis)" autocomplete="off">
+                    <div id="emojiAutocomplete" class="emoji-autocomplete hidden"></div>
+                </div>
+                <button id="sendChat" type="button" class="primary">Send</button>
+            </div>
+        </form>
+    </dialog>
 
     <dialog id="feedModal" class="modal">
         <form method="dialog" class="modal-panel">
@@ -79,6 +103,23 @@
                 <label class="setting-row text-setting">
                     <span>Your name</span>
                     <input id="displayName" type="text" maxlength="32" autocomplete="name">
+                </label>
+                <label class="setting-row text-setting">
+                    <span>Chat name</span>
+                    <input id="chatNameInput" type="text" maxlength="32">
+                </label>
+                <label class="setting-row">
+                    <span>Background color</span>
+                    <input id="bgColorInput" type="color">
+                </label>
+                <label class="setting-row">
+                    <span>Background image</span>
+                    <input id="bgImageInput" type="file" accept="image/*">
+                </label>
+                <button id="clearBgImage" type="button" class="danger">Clear image</button>
+                <label class="setting-row">
+                    <span>Accent color</span>
+                    <input id="accentColorInput" type="color">
                 </label>
                 <label class="setting-row">
                     <input type="radio" name="videoFit" value="contain" checked>
