@@ -13,8 +13,10 @@
         localStreams: new Map(),
         outboundCalls: new Map(),
         dataConnections: new Map(),
+        peerNames: new Map(),
         tiles: new Map(),
         tileConfigs: new Map(),
+        displayName: ensureDisplayName(),
         layout: "grid",
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
@@ -31,6 +33,7 @@
         screenAudio: document.getElementById("screenAudio"),
         appSettingsButton: document.getElementById("appSettingsButton"),
         appSettingsModal: document.getElementById("appSettingsModal"),
+        displayName: document.getElementById("displayName"),
         mirrorLocalCamera: document.getElementById("mirrorLocalCamera"),
         feedModal: document.getElementById("feedModal"),
         feedModalTitle: document.getElementById("feedModalTitle"),
@@ -102,7 +105,7 @@
 
         state.dataConnections.set(conn.peer, conn);
         conn.on("open", () => {
-            conn.send({ type: "hello", peerId: state.peer.id });
+            conn.send({ type: "hello", peerId: state.peer.id, displayName: state.displayName });
 
             if (state.isHost) {
                 const roster = [...state.dataConnections.keys()].filter((id) => id !== conn.peer);
@@ -133,6 +136,14 @@
     function handleMessage(peerId, message) {
         if (!message || typeof message !== "object") return;
 
+        if (message.displayName) {
+            setPeerName(peerId, message.displayName);
+        }
+
+        if (message.type === "hello") {
+            return;
+        }
+
         if (message.type === "welcome") {
             setStatus(`Joined room ${message.roomId}. Connecting to ${message.peers.length} peer(s).`);
             message.peers.forEach((id) => connectData(id, false));
@@ -152,6 +163,11 @@
 
         if (message.type === "stream-stopped") {
             removeTile(tileId(peerId, message.kind));
+            return;
+        }
+
+        if (message.type === "name-changed") {
+            setPeerName(peerId, message.displayName);
         }
     }
 
@@ -320,6 +336,7 @@
             metadata: {
                 kind,
                 from: state.peer.id,
+                displayName: state.displayName,
                 hasAudio: stream.getAudioTracks().length > 0
             }
         });
@@ -331,9 +348,12 @@
 
     function addRemoteStream(peerId, metadata, stream) {
         const kind = metadata && metadata.kind ? metadata.kind : "camera";
+        if (metadata && metadata.displayName) {
+            setPeerName(peerId, metadata.displayName);
+        }
         addTile({
             id: tileId(peerId, kind),
-            owner: shortPeer(peerId),
+            owner: remoteDisplayName(peerId, metadata),
             subtitle: kind === "screen" ? screenSubtitle(stream) : "Camera and microphone",
             kind,
             stream,
@@ -367,7 +387,7 @@
         tile.classList.toggle("preview", Boolean(config.preview));
         tile.classList.toggle("local-camera", config.local && config.kind === "camera");
         tile.style.zIndex = String(++state.zIndex);
-        title.textContent = `${config.owner} - ${config.kind === "screen" ? "Screen" : "Camera"}`;
+        title.textContent = tileTitle(config);
         video.srcObject = config.stream;
         video.muted = config.muted;
         resizeHandle.className = "resize-handle";
@@ -484,7 +504,7 @@
         const tile = state.tiles.get(id);
         if (!config || !tile) return;
 
-        els.feedModalTitle.textContent = `${config.owner} - ${config.kind === "screen" ? "Screen" : "Camera"}`;
+        els.feedModalTitle.textContent = tileTitle(config);
         els.feedModalControls.replaceChildren();
         updateFeedModalSubtitle(config);
 
@@ -868,6 +888,15 @@
         els.cameraToggle.addEventListener("click", toggleCamera);
         els.screenToggle.addEventListener("click", toggleScreen);
         els.appSettingsButton.addEventListener("click", () => els.appSettingsModal.showModal());
+        els.displayName.value = state.displayName;
+        els.displayName.addEventListener("change", () => updateDisplayName(els.displayName.value));
+        els.displayName.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                updateDisplayName(els.displayName.value);
+                els.displayName.blur();
+            }
+        });
         els.mirrorLocalCamera.checked = state.mirrorLocalCamera;
         els.mirrorLocalCamera.addEventListener("change", () => {
             state.mirrorLocalCamera = els.mirrorLocalCamera.checked;
@@ -906,6 +935,46 @@
         els.screenToggle.textContent = screenOn ? "Stop screen" : "Share screen";
         els.screenToggle.classList.toggle("danger", screenOn);
         els.screenAudio.disabled = screenOn;
+    }
+
+    function updateDisplayName(value) {
+        const nextName = sanitizeDisplayName(value) || "Guest";
+        state.displayName = nextName;
+        localStorage.setItem("vidChatDisplayName", nextName);
+        els.displayName.value = nextName;
+        broadcast({ type: "name-changed", displayName: nextName });
+        setStatus(`Name updated to ${nextName}.`);
+    }
+
+    function setPeerName(peerId, displayName) {
+        const nextName = sanitizeDisplayName(displayName);
+        if (!nextName) return;
+
+        state.peerNames.set(peerId, nextName);
+        for (const [id, config] of state.tileConfigs) {
+            if (!id.startsWith(`${peerId}:`)) continue;
+            config.owner = nextName;
+            updateTileTitle(id);
+        }
+    }
+
+    function updateTileTitle(id) {
+        const tile = state.tiles.get(id);
+        const config = state.tileConfigs.get(id);
+        if (!tile || !config) return;
+
+        const title = tile.querySelector(".tile-title");
+        if (title) title.textContent = tileTitle(config);
+    }
+
+    function tileTitle(config) {
+        return `${config.owner} - ${config.kind === "screen" ? "Screen" : "Camera"}`;
+    }
+
+    function remoteDisplayName(peerId, metadata) {
+        return sanitizeDisplayName(metadata && metadata.displayName)
+            || state.peerNames.get(peerId)
+            || shortPeer(peerId);
     }
 
     function updatePeerStatus() {
@@ -956,6 +1025,21 @@
         const bytes = new Uint8Array(6);
         crypto.getRandomValues(bytes);
         return [...bytes].map((byte) => byte.toString(36).padStart(2, "0")).join("").slice(0, 10);
+    }
+
+    function ensureDisplayName() {
+        const storedName = sanitizeDisplayName(localStorage.getItem("vidChatDisplayName"));
+        if (storedName) return storedName;
+
+        const promptedName = sanitizeDisplayName(window.prompt("What name should appear on your video?", ""));
+        const displayName = promptedName || "Guest";
+        localStorage.setItem("vidChatDisplayName", displayName);
+        return displayName;
+    }
+
+    function sanitizeDisplayName(value) {
+        if (!value) return "";
+        return String(value).replace(/\s+/g, " ").trim().slice(0, 32);
     }
 
     function sanitizeRoomId(value) {
