@@ -1,56 +1,79 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Video Chat</title>
+    <title>VidChat</title>
     <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
 </head>
-
 <body>
+    <main class="app-shell">
+        <section class="topbar" aria-label="Room controls">
+            <div>
+                <p class="eyebrow">PeerJS room</p>
+                <h1>VidChat</h1>
+            </div>
+            <div class="room-actions">
+                <button id="copyRoomLink" class="primary" type="button" title="Copy room link">Copy room link</button>
+                <button id="newRoom" type="button" title="Start a new room">New room</button>
+            </div>
+        </section>
 
-    <button onclick="joinRoom('room','Jack')">Join as Jack</button>
-    <button onclick="joinRoom('room','James')">Join as James</button>
-    <button onclick="joinRoom('room','Sarah')">Join as Sarah</button>
-    <button onclick="joinRoom('room','Micah')">Join as Micah</button>
-    <button onclick="joinRoom('room','Nora')">Join as Nora</button>
-    <button onclick="joinRoom('room','Bob')">Join as Bob</button>
-    <button onclick="joinRoom('room','Kathy')">Join as Kathy</button>
-    <button onclick="joinRoom('room','Mark')">Join as Mark</button>
-    <button onclick="joinRoom('room','Miriam')">Join as Miriam</button>
+        <section class="control-panel" aria-label="Call controls">
+            <div class="room-card">
+                <label for="roomId">Room ID</label>
+                <div class="copy-row">
+                    <input id="roomId" type="text" readonly>
+                    <button id="copyRoomId" type="button" title="Copy room ID">Copy</button>
+                </div>
+                <p id="status" class="status">Starting...</p>
+            </div>
 
-    <div id="videos"></div>
+            <div class="button-group" aria-label="Media controls">
+                <button id="cameraToggle" type="button">Share camera</button>
+                <button id="screenToggle" type="button">Share screen</button>
+                <label class="check-control" title="Include tab or system audio when the browser offers it">
+                    <input id="screenAudio" type="checkbox" checked>
+                    <span>Screen audio</span>
+                </label>
+            </div>
 
-    <div id="chat">
-        <h1>Chat</h1>
-        <hr>
-        <div id="messages"></div>
-        <input type="text" id="chatInput" placeholder="Type a message">
-        <p id="mojis"></p>
-    </div>
+            <div class="layout-controls" aria-label="Layout controls">
+                <span>Layout</span>
+                <div class="segmented">
+                    <button class="layout-button active" type="button" data-layout="grid">Grid</button>
+                    <button class="layout-button" type="button" data-layout="spotlight">Spotlight</button>
+                    <button class="layout-button" type="button" data-layout="filmstrip">Filmstrip</button>
+                </div>
+            </div>
+        </section>
 
-    <script src="vidChat.js" type="module"></script>
-    <script>
-        let emojis = [0x1F600, 0x1F604, 0x1F34A, 0x1F344, 0x1F37F, 0x1F363, 0x1F370, 0x1F355,
-            0x1F354, 0x1F35F, 0x1F6C0, 0x1F48E, 0x1F5FA, 0x23F0, 0x1F579, 0x1F4DA,
-            0x1F431, 0x1F42A, 0x1F439, 0x1F424]
-        
-        function handleMoji(emoji) {
-            textBox = document.getElementById("chatInput")
-            return function(){
-                textBox.value = textBox.value + emoji
-            }
-        }
+        <section id="videos" class="video-stage grid" aria-live="polite"></section>
+    </main>
 
-        function makeClickable(emojiCode, i) {
-            emoji = String.fromCodePoint(emojiCode)
-            window[`f_${i}`] = handleMoji(emoji)
-            return `<a onclick="f_${i}()" style="cursor: pointer;">${emoji}</a>`
-        }
-        document.getElementById("mojis").innerHTML = emojis.map((x,i) => makeClickable(x,i)).join(' ')
-    </script>
+    <template id="tileTemplate">
+        <article class="video-tile">
+            <video playsinline autoplay></video>
+            <div class="tile-bar">
+                <div>
+                    <strong class="tile-title"></strong>
+                    <span class="tile-subtitle"></span>
+                </div>
+                <div class="tile-actions">
+                    <button class="focus-button" type="button" title="Focus this video">Focus</button>
+                    <button class="audio-button" type="button" title="Adjust this video's audio">Audio</button>
+                </div>
+            </div>
+            <div class="audio-popover" hidden>
+                <label class="volume-control" title="Adjust this video's audio">
+                    <span>Audio</span>
+                    <input class="volume-slider" type="range" min="0" max="1" step="0.05" value="1">
+                </label>
+            </div>
+        </article>
+    </template>
+
+    <script src="vidChat.js"></script>
 </body>
-
 </html>

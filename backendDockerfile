@@ -1,9 +1,0 @@
-FROM arm32v7/node 
-WORKDIR /backend
-COPY ./backend/package*.json ./
-RUN ls
-RUN which npm
-RUN npm install 
-COPY ./backend/* . 
-EXPOSE 6503
-CMD node signaling_server.js

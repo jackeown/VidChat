@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About VidChat</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="app-shell">
+        <section class="topbar" aria-label="About VidChat">
+            <div>
+                <p class="eyebrow">About</p>
+                <h1>VidChat</h1>
+            </div>
+            <div class="room-actions">
+                <a class="button-link primary" href="./index.html">Open app</a>
+            </div>
+        </section>
+
+        <section class="about-panel">
+            <h2>What It Is Now</h2>
+            <p>
+                VidChat is currently a static PeerJS video room that can be hosted on GitHub Pages.
+                It creates a random room ID, puts that ID in a copyable link, and lets multiple people
+                join the same peer-to-peer room from that link.
+            </p>
+            <p>
+                The current app supports camera sharing, screen sharing, optional screen-share audio,
+                per-feed audio volume controls, and video tiles that can be moved and resized inside
+                the call area. Layout buttons arrange the visible feeds, but each feed can also be
+                adjusted manually.
+            </p>
+
+            <h2>Future Enhancement</h2>
+            <p>
+                A future version could turn the underlying PeerJS behavior into reusable vanilla
+                JavaScript web components. That is not what the app currently exposes.
+            </p>
+            <p>
+                The earlier component idea included a global <em>window.vidChatMe</em> Peer object,
+                persisted peer IDs, <em>PeerMedia</em> components for peer video and screen streams,
+                <em>PeerChat</em> components for persistent text chat, and a global
+                <em>window.vidChatPeers</em> object for tracking connections.
+            </p>
+            <p>
+                That component toolkit would be useful if VidChat becomes a library for building
+                custom PeerJS apps. For now, VidChat is an end-user room app rather than a reusable
+                web-component API.
+            </p>
+        </section>
+    </main>
+</body>
+</html>
