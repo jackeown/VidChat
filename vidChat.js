@@ -1,6 +1,6 @@
 (function () {
     if (typeof Peer === "undefined") {
-        throw new Error("PeerJS is required for VidChat.");
+        throw new Error("PeerJS is required for MeliChat.");
     }
 
     const qs = new URLSearchParams(window.location.search);
@@ -401,7 +401,7 @@
 
         tile.addEventListener("dblclick", (event) => {
             if (isInteractiveControl(event.target)) return;
-            enterTileFullscreen(tile);
+            toggleTileExpanded(tile);
         });
         tile.addEventListener("pointerdown", () => bringToFront(tile));
         bindTileDragging(tile, tile);
@@ -434,7 +434,7 @@
         if (oldFrame && oldFrame.placed) {
             setTileFrame(tile, oldFrame.x, oldFrame.y, oldFrame.width, oldFrame.height);
         } else {
-            arrangeTiles(state.layout, false);
+            placeTileWithoutOverlap(tile);
         }
         resolveOverlaps();
         applyFocus();
@@ -593,19 +593,13 @@
         applyFocus();
     }
 
-    async function enterTileFullscreen(tile) {
-        if (document.fullscreenElement === tile) {
-            await document.exitFullscreen();
-            return;
+    function toggleTileExpanded(tile) {
+        const alreadyExpanded = tile.classList.contains("expanded");
+        for (const other of state.tiles.values()) {
+            other.classList.remove("expanded");
         }
-
-        if (document.fullscreenElement) {
-            await document.exitFullscreen();
-        }
-
-        if (tile.requestFullscreen) {
-            await tile.requestFullscreen();
-        }
+        tile.classList.toggle("expanded", !alreadyExpanded);
+        if (!alreadyExpanded) bringToFront(tile);
     }
 
     function applyFocus() {
@@ -634,9 +628,21 @@
     function resolveOverlaps() {
         for (const tile of state.tiles.values()) {
             if (frameOverlaps(tile, currentFrame(tile))) {
-                setTileFrame(tile, tile.offsetLeft, tile.offsetTop, tile.offsetWidth, tile.offsetHeight);
+                placeTileWithoutOverlap(tile);
             }
         }
+    }
+
+    function placeTileWithoutOverlap(tile) {
+        const stage = stageRect();
+        const width = Math.min(Math.max(tile.offsetWidth || 360, 120), Math.max(120, stage.width));
+        const height = Math.min(Math.max(tile.offsetHeight || 240, 90), Math.max(90, stage.height));
+        const frame = findOpenFrame(tile, { x: 0, y: 0, width, height });
+        if (frame) {
+            setTileFrame(tile, frame.x, frame.y, frame.width, frame.height, false);
+            return;
+        }
+        arrangeTiles(state.layout, true);
     }
 
     function arrangeTiles(layout, force) {
@@ -711,6 +717,7 @@
     function bindTileDragging(tile, handle) {
         handle.addEventListener("pointerdown", (event) => {
             if (isInteractiveControl(event.target)) return;
+            if (tile.classList.contains("expanded")) return;
             event.preventDefault();
 
             const start = pointerState(event, tile);
@@ -740,6 +747,7 @@
 
     function bindTileResizing(tile, handle) {
         handle.addEventListener("pointerdown", (event) => {
+            if (tile.classList.contains("expanded")) return;
             event.preventDefault();
             event.stopPropagation();
 
@@ -791,7 +799,7 @@
         frame.y = clamp(y, 0, Math.max(0, stage.height - frame.height));
 
         if (avoidOverlap && frameOverlaps(tile, frame)) {
-            frame = findOpenFrame(tile, frame) || currentFrame(tile, stage);
+            frame = currentFrame(tile, stage);
         }
 
         tile.style.left = `${frame.x}px`;
@@ -914,6 +922,12 @@
         });
         document.querySelectorAll(".layout-button").forEach((button) => {
             button.addEventListener("click", () => setLayout(button.dataset.layout));
+        });
+        document.addEventListener("keydown", (event) => {
+            if (event.key !== "Escape") return;
+            for (const tile of state.tiles.values()) {
+                tile.classList.remove("expanded");
+            }
         });
     }
 
