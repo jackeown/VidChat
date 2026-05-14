@@ -33,10 +33,14 @@
         unreadCount: 0,
         chatOpen: false,
         chatHistory: [],
-        connectionSummaryTimer: null
+        connectionSummaryTimer: null,
+        incomingFiles: new Map(),
+        outgoingFiles: new Map()
     };
     const maxDataConnectionRetries = 4;
     const maxMediaCallRetries = 3;
+    const fileChunkSize = 64 * 1024;
+    const fileBackpressureLimit = 1024 * 1024;
 
     const emojiAliasOverrides = {
         "100": "💯",
@@ -198,6 +202,8 @@
             if (state.dataConnections.get(conn.peer) !== conn) return;
             state.dataConnections.delete(conn.peer);
             closeCallsForPeer(conn.peer);
+            failIncomingFilesForPeer(conn.peer, "Transfer interrupted.");
+            failOutgoingFilesForPeer(conn.peer, "Peer disconnected during transfer.");
             removePeerTiles(conn.peer);
             if (state.isHost) broadcast({ type: "peer-left", peerId: conn.peer });
             updatePeerStatus();
@@ -205,6 +211,8 @@
         conn.on("error", () => {
             if (state.dataConnections.get(conn.peer) !== conn) return;
             state.dataConnections.delete(conn.peer);
+            failIncomingFilesForPeer(conn.peer, "Transfer failed.");
+            failOutgoingFilesForPeer(conn.peer, "Peer connection failed during transfer.");
             updatePeerStatus();
         });
     }
@@ -227,7 +235,7 @@
                 message.history.forEach((msg) => {
                     if (msg.type === "chat") {
                         addChatMessage(msg.peerId, msg.text, msg.timestamp);
-                    } else if (msg.type === "file") {
+                    } else if (msg.type === "file" && msg.data) {
                         addFileMessage(msg.peerId, msg.name, msg.size, msg.data, msg.timestamp);
                     }
                 });
@@ -261,8 +269,28 @@
             addChatMessage(peerId, message.text, message.timestamp);
         }
 
-        if (message.type === "file") {
+        if (message.type === "file" && message.data) {
             addFileMessage(peerId, message.name, message.size, message.data, message.timestamp);
+        }
+
+        if (message.type === "file-start") {
+            handleFileStart(peerId, message);
+        }
+
+        if (message.type === "file-chunk") {
+            handleFileChunk(peerId, message).catch(() => {});
+        }
+
+        if (message.type === "file-end") {
+            handleFileEnd(peerId, message);
+        }
+
+        if (message.type === "file-ack") {
+            handleFileAck(peerId, message);
+        }
+
+        if (message.type === "file-error") {
+            handleFileError(peerId, message);
         }
     }
 
@@ -355,12 +383,299 @@
         els.chatHistory.appendChild(messageEl);
         els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
 
-        state.chatHistory.push({ peerId, author, name, size, data, timestamp, type: "file" });
+        state.chatHistory.push({ peerId, author, name, size, timestamp, type: "file" });
 
         if (!local && !state.chatOpen) {
             state.unreadCount++;
             updateChatBadge();
         }
+    }
+
+    function addFileTransferMessage(peerId, name, size, timestamp, label) {
+        const local = peerId === "local";
+        const author = local ? state.displayName : (state.peerNames.get(peerId) || shortPeer(peerId));
+        const timeStr = new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+        const messageEl = document.createElement("div");
+        messageEl.className = `chat-message ${local ? "local" : ""}`;
+
+        const authorEl = document.createElement("span");
+        authorEl.className = "author";
+        authorEl.textContent = author;
+
+        const timeEl = document.createElement("span");
+        timeEl.className = "timestamp";
+        timeEl.textContent = timeStr;
+        authorEl.appendChild(timeEl);
+
+        const contentEl = document.createElement("div");
+        contentEl.className = "content file-transfer";
+
+        const title = document.createElement("div");
+        title.className = "file-transfer-title";
+        const nameEl = document.createElement("strong");
+        nameEl.textContent = name;
+        const sizeEl = document.createElement("span");
+        sizeEl.className = "file-info";
+        sizeEl.textContent = formatBytes(size);
+        title.append(nameEl, sizeEl);
+
+        const status = document.createElement("div");
+        status.className = "file-transfer-status";
+        status.textContent = label;
+
+        const progress = document.createElement("progress");
+        progress.className = "file-progress";
+        progress.max = size || 1;
+        progress.value = 0;
+
+        contentEl.append(title, status, progress);
+        messageEl.append(authorEl, contentEl);
+        els.chatHistory.appendChild(messageEl);
+        els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
+
+        if (!local && !state.chatOpen) {
+            state.unreadCount++;
+            updateChatBadge();
+        }
+
+        return {
+            messageEl,
+            status,
+            progress,
+            complete(text) {
+                status.textContent = text;
+                progress.value = progress.max;
+                contentEl.classList.add("complete");
+            },
+            fail(text) {
+                status.textContent = text;
+                contentEl.classList.add("failed");
+            }
+        };
+    }
+
+    function updateFileProgress(ui, received, total, prefix) {
+        if (!ui) return;
+        ui.progress.max = total || 1;
+        ui.progress.value = Math.min(received, total || received);
+        const percent = total ? Math.floor((received / total) * 100) : 0;
+        ui.status.textContent = `${prefix} ${formatBytes(received)} of ${formatBytes(total)} (${percent}%)`;
+        els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
+    }
+
+    async function sendFile(file) {
+        if (!state.peer) {
+            const ui = addFileTransferMessage("local", file.name, file.size, Date.now(), "Room is still connecting.");
+            ui.fail("Room is still connecting. Try again in a moment.");
+            return;
+        }
+
+        const recipients = [...state.dataConnections.values()].filter((conn) => conn.open);
+        const timestamp = Date.now();
+        const transferId = `${state.peer.id}-${timestamp}-${Math.random().toString(36).slice(2)}`;
+        const totalBytes = file.size * Math.max(1, recipients.length);
+        const ui = addFileTransferMessage("local", file.name, file.size, timestamp, recipients.length ? `Sending to ${recipients.length} peer${recipients.length === 1 ? "" : "s"}...` : "No connected peers to send to.");
+
+        if (!recipients.length) {
+            ui.fail("No connected peers to send to.");
+            return;
+        }
+
+        let sentBytes = 0;
+        let completed = 0;
+        state.outgoingFiles.set(transferId, {
+            ui,
+            recipients: new Set(recipients.map((conn) => conn.peer)),
+            acknowledged: new Set(),
+            failed: new Set()
+        });
+
+        const results = await Promise.allSettled(recipients.map(async (conn) => {
+            conn.send({
+                type: "file-start",
+                transferId,
+                name: file.name,
+                size: file.size,
+                mimeType: file.type || "application/octet-stream",
+                timestamp
+            });
+
+            for (let offset = 0, index = 0; offset < file.size; offset += fileChunkSize, index++) {
+                const chunk = await file.slice(offset, offset + fileChunkSize).arrayBuffer();
+                await waitForSendBuffer(conn);
+                conn.send({
+                    type: "file-chunk",
+                    transferId,
+                    index,
+                    data: chunk
+                });
+                sentBytes += chunk.byteLength;
+                updateFileProgress(ui, sentBytes, totalBytes, "Sent");
+            }
+
+            await waitForSendBuffer(conn);
+            conn.send({ type: "file-end", transferId });
+            completed++;
+            if (state.outgoingFiles.has(transferId)) {
+                ui.status.textContent = `Uploaded to ${completed} of ${recipients.length} peer${recipients.length === 1 ? "" : "s"}...`;
+            }
+        }));
+
+        const failures = results.filter((result) => result.status === "rejected").length;
+        if (failures) {
+            ui.fail(`Failed for ${failures} peer${failures === 1 ? "" : "s"}.`);
+            state.outgoingFiles.delete(transferId);
+            return;
+        }
+
+        if (state.outgoingFiles.has(transferId)) {
+            ui.status.textContent = `Uploaded to ${recipients.length} peer${recipients.length === 1 ? "" : "s"}. Waiting for download confirmation...`;
+        }
+    }
+
+    function waitForSendBuffer(conn) {
+        return new Promise((resolve) => {
+            const channel = conn.dataChannel || conn._dc;
+            if (!channel || typeof channel.bufferedAmount !== "number") {
+                resolve();
+                return;
+            }
+
+            const check = () => {
+                if (!conn.open || channel.readyState === "closed") {
+                    resolve();
+                    return;
+                }
+                if (channel.bufferedAmount < fileBackpressureLimit) {
+                    resolve();
+                    return;
+                }
+                window.setTimeout(check, 30);
+            };
+            check();
+        });
+    }
+
+    function handleFileStart(peerId, message) {
+        if (!message.transferId || !message.name || typeof message.size !== "number") return;
+        const transferKey = fileTransferKey(peerId, message.transferId);
+        const existing = state.incomingFiles.get(transferKey);
+        if (existing) existing.ui.fail("Transfer restarted.");
+
+        const ui = addFileTransferMessage(peerId, message.name, message.size, message.timestamp || Date.now(), "Receiving...");
+        state.incomingFiles.set(transferKey, {
+            peerId,
+            transferId: message.transferId,
+            name: message.name,
+            size: message.size,
+            mimeType: message.mimeType || "application/octet-stream",
+            timestamp: message.timestamp || Date.now(),
+            chunks: [],
+            receivedBytes: 0,
+            ui
+        });
+    }
+
+    async function handleFileChunk(peerId, message) {
+        const transfer = state.incomingFiles.get(fileTransferKey(peerId, message.transferId));
+        if (!transfer || typeof message.index !== "number") return;
+
+        const chunk = await normalizeFileChunk(message.data);
+        if (!chunk || transfer.chunks[message.index]) return;
+
+        transfer.chunks[message.index] = chunk;
+        transfer.receivedBytes += chunk.byteLength;
+        updateFileProgress(transfer.ui, transfer.receivedBytes, transfer.size, "Received");
+    }
+
+    function handleFileEnd(peerId, message) {
+        const key = fileTransferKey(peerId, message.transferId);
+        const transfer = state.incomingFiles.get(key);
+        if (!transfer) return;
+
+        state.incomingFiles.delete(key);
+        if (transfer.receivedBytes !== transfer.size) {
+            transfer.ui.fail(`Transfer incomplete: ${formatBytes(transfer.receivedBytes)} of ${formatBytes(transfer.size)} received.`);
+            sendToPeer(peerId, { type: "file-error", transferId: message.transferId, reason: "Transfer incomplete." });
+            return;
+        }
+
+        const blob = new Blob(transfer.chunks, { type: transfer.mimeType });
+        transfer.ui.complete("Received. Download is ready.");
+        addFileMessage(peerId, transfer.name, transfer.size, blob, transfer.timestamp);
+        sendToPeer(peerId, { type: "file-ack", transferId: message.transferId });
+    }
+
+    async function normalizeFileChunk(data) {
+        if (data instanceof ArrayBuffer) return data;
+        if (data instanceof Blob) return data.arrayBuffer();
+        if (ArrayBuffer.isView(data)) return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        return null;
+    }
+
+    function failIncomingFilesForPeer(peerId, reason) {
+        for (const [key, transfer] of state.incomingFiles) {
+            if (transfer.peerId !== peerId) continue;
+            transfer.ui.fail(reason);
+            state.incomingFiles.delete(key);
+        }
+    }
+
+    function failOutgoingFilesForPeer(peerId, reason) {
+        for (const [transferId, transfer] of state.outgoingFiles) {
+            if (!transfer.recipients.has(peerId) || transfer.acknowledged.has(peerId)) continue;
+            transfer.failed.add(peerId);
+            updateOutgoingFileStatus(transferId, reason);
+        }
+    }
+
+    function handleFileAck(peerId, message) {
+        const transfer = state.outgoingFiles.get(message.transferId);
+        if (!transfer) return;
+
+        transfer.acknowledged.add(peerId);
+        updateOutgoingFileStatus(message.transferId);
+    }
+
+    function handleFileError(peerId, message) {
+        const transfer = state.outgoingFiles.get(message.transferId);
+        if (!transfer) return;
+
+        transfer.failed.add(peerId);
+        updateOutgoingFileStatus(message.transferId, message.reason || "Transfer failed.");
+    }
+
+    function updateOutgoingFileStatus(transferId, failureReason) {
+        const transfer = state.outgoingFiles.get(transferId);
+        if (!transfer) return;
+
+        const total = transfer.recipients.size;
+        const done = transfer.acknowledged.size;
+        const failed = transfer.failed.size;
+
+        if (failed) {
+            transfer.ui.fail(`${failureReason || "Transfer failed."} ${done} confirmed, ${failed} failed.`);
+            state.outgoingFiles.delete(transferId);
+            return;
+        }
+
+        if (done >= total) {
+            transfer.ui.complete(`Received by ${total} peer${total === 1 ? "" : "s"}.`);
+            state.outgoingFiles.delete(transferId);
+            return;
+        }
+
+        transfer.ui.status.textContent = `Received by ${done} of ${total} peer${total === 1 ? "" : "s"}...`;
+    }
+
+    function sendToPeer(peerId, message) {
+        const conn = state.dataConnections.get(peerId);
+        if (conn && conn.open) conn.send(message);
+    }
+
+    function fileTransferKey(peerId, transferId) {
+        return `${peerId}:${transferId}`;
     }
 
     function formatBytes(bytes) {
@@ -1621,20 +1936,9 @@
             const file = event.target.files[0];
             if (!file) return;
 
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const msg = {
-                    type: "file",
-                    name: file.name,
-                    size: file.size,
-                    data: e.target.result,
-                    timestamp: Date.now()
-                };
-                addFileMessage("local", msg.name, msg.size, msg.data, msg.timestamp);
-                broadcast(msg);
+            sendFile(file).finally(() => {
                 els.fileInput.value = "";
-            };
-            reader.readAsArrayBuffer(file);
+            });
         });
 
         els.sendChat.addEventListener("click", sendChatMessage);

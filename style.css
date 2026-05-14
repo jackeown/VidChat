@@ -632,6 +632,59 @@ button.danger {
     color: var(--muted);
     font-weight: 400;
 }
+
+.file-transfer {
+    display: grid;
+    gap: 8px;
+    min-width: min(320px, 70vw);
+}
+
+.file-transfer-title {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.file-transfer-title strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-transfer-status {
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.file-progress {
+    width: 100%;
+    height: 10px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: #0c0f12;
+    accent-color: var(--accent);
+}
+
+.file-progress::-webkit-progress-bar {
+    background: #0c0f12;
+}
+
+.file-progress::-webkit-progress-value {
+    background: var(--accent);
+}
+
+.file-transfer.complete .file-transfer-status {
+    color: #56d364;
+}
+
+.file-transfer.failed .file-transfer-status {
+    color: var(--danger);
+}
+
+.emoji-autocomplete {
     position: absolute;
     bottom: 100%;
     left: 0;
