@@ -12,6 +12,10 @@
         previewStreams: new Map(),
         localStreams: new Map(),
         outboundCalls: new Map(),
+        inboundCalls: new Map(),
+        callRetryTimers: new Map(),
+        dataRetryTimers: new Map(),
+        dataRetryAttempts: new Map(),
         dataConnections: new Map(),
         peerNames: new Map(),
         tiles: new Map(),
@@ -30,6 +34,8 @@
         chatOpen: false,
         chatHistory: []
     };
+    const maxDataConnectionRetries = 4;
+    const maxMediaCallRetries = 3;
 
     const emojiAliasOverrides = {
         "100": "💯",
@@ -135,13 +141,31 @@
 
     function bindPeer(peer) {
         peer.on("connection", (conn) => registerConnection(conn));
-        peer.on("call", (call) => {
-            call.answer();
-            call.on("stream", (stream) => addRemoteStream(call.peer, call.metadata, stream));
-            call.on("close", () => removeTile(tileId(call.peer, call.metadata && call.metadata.kind)));
-            call.on("error", () => removeTile(tileId(call.peer, call.metadata && call.metadata.kind)));
-        });
+        peer.on("call", handleIncomingCall);
         peer.on("disconnected", () => setStatus("Disconnected from PeerJS. Reconnecting..."));
+    }
+
+    function handleIncomingCall(call) {
+        const kind = call.metadata && call.metadata.kind ? call.metadata.kind : "camera";
+        const key = `${kind}:${call.peer}`;
+        const oldCall = state.inboundCalls.get(key);
+        state.inboundCalls.set(key, call);
+        if (oldCall && oldCall !== call) oldCall.close();
+
+        call.answer();
+        call.on("stream", (stream) => {
+            if (state.inboundCalls.get(key) !== call) return;
+            addRemoteStream(call.peer, call.metadata, stream);
+        });
+        call.on("close", () => clearIncomingCall(key, call));
+        call.on("error", () => clearIncomingCall(key, call));
+    }
+
+    function clearIncomingCall(key, call) {
+        if (state.inboundCalls.get(key) !== call) return;
+        state.inboundCalls.delete(key);
+        const [kind, peerId] = splitCallKey(key);
+        removeTile(tileId(peerId, kind));
     }
 
     function registerConnection(conn) {
@@ -152,6 +176,7 @@
 
         state.dataConnections.set(conn.peer, conn);
         conn.on("open", () => {
+            clearDataConnectionRetry(conn.peer);
             conn.send({ type: "hello", peerId: state.peer.id, displayName: state.displayName });
 
             if (state.isHost) {
@@ -207,11 +232,13 @@
         }
 
         if (message.type === "peer-joined") {
+            connectData(message.peerId, false);
             updatePeerStatus();
             return;
         }
 
         if (message.type === "peer-left") {
+            clearDataConnectionRetry(message.peerId);
             removePeerTiles(message.peerId);
             updatePeerStatus();
             return;
@@ -446,7 +473,30 @@
         registerConnection(conn);
         conn.on("error", () => {
             if (required) setStatus("The room is not reachable yet. Check the link or try again.");
+            scheduleDataConnectionRetry(peerId, required);
         });
+    }
+
+    function scheduleDataConnectionRetry(peerId, required) {
+        if (!peerId || state.dataConnections.has(peerId) || state.dataRetryTimers.has(peerId)) return;
+
+        const attempt = (state.dataRetryAttempts.get(peerId) || 0) + 1;
+        if (attempt > maxDataConnectionRetries) return;
+
+        state.dataRetryAttempts.set(peerId, attempt);
+        const delay = Math.min(8000, 600 * (2 ** (attempt - 1)));
+        const timer = window.setTimeout(() => {
+            state.dataRetryTimers.delete(peerId);
+            if (!state.dataConnections.has(peerId)) connectData(peerId, required);
+        }, delay);
+        state.dataRetryTimers.set(peerId, timer);
+    }
+
+    function clearDataConnectionRetry(peerId) {
+        const timer = state.dataRetryTimers.get(peerId);
+        if (timer) window.clearTimeout(timer);
+        state.dataRetryTimers.delete(peerId);
+        state.dataRetryAttempts.delete(peerId);
     }
 
     async function toggleCamera() {
@@ -556,6 +606,7 @@
     function closeOutboundCalls(kind) {
         for (const [key, call] of state.outboundCalls) {
             if (key.startsWith(`${kind}:`)) {
+                clearMediaCallRetry(key);
                 call.close();
                 state.outboundCalls.delete(key);
             }
@@ -574,12 +625,16 @@
         }
     }
 
-    function callPeer(peerId, kind, stream) {
+    function callPeer(peerId, kind, stream, attempt = 0) {
         if (!state.peer || peerId === state.peer.id) return;
 
         const key = `${kind}:${peerId}`;
         const oldCall = state.outboundCalls.get(key);
-        if (oldCall) oldCall.close();
+        if (oldCall) {
+            state.outboundCalls.delete(key);
+            oldCall.close();
+        }
+        clearMediaCallRetry(key);
 
         const call = state.peer.call(peerId, stream, {
             metadata: {
@@ -591,8 +646,35 @@
         });
 
         state.outboundCalls.set(key, call);
-        call.on("close", () => state.outboundCalls.delete(key));
-        call.on("error", () => state.outboundCalls.delete(key));
+        call.on("close", () => clearOutboundCall(key, call, stream, attempt));
+        call.on("error", () => clearOutboundCall(key, call, stream, attempt));
+    }
+
+    function clearOutboundCall(key, call, stream, attempt) {
+        if (state.outboundCalls.get(key) !== call) return;
+        state.outboundCalls.delete(key);
+        scheduleMediaCallRetry(key, stream, attempt + 1);
+    }
+
+    function scheduleMediaCallRetry(key, stream, attempt) {
+        if (attempt > maxMediaCallRetries || state.callRetryTimers.has(key)) return;
+        const [kind, peerId] = splitCallKey(key);
+        if (state.localStreams.get(kind) !== stream || !state.dataConnections.has(peerId)) return;
+
+        const delay = Math.min(6000, 750 * (2 ** (attempt - 1)));
+        const timer = window.setTimeout(() => {
+            state.callRetryTimers.delete(key);
+            if (state.localStreams.get(kind) === stream && state.dataConnections.has(peerId)) {
+                callPeer(peerId, kind, stream, attempt);
+            }
+        }, delay);
+        state.callRetryTimers.set(key, timer);
+    }
+
+    function clearMediaCallRetry(key) {
+        const timer = state.callRetryTimers.get(key);
+        if (timer) window.clearTimeout(timer);
+        state.callRetryTimers.delete(key);
     }
 
     function addRemoteStream(peerId, metadata, stream) {
@@ -639,6 +721,7 @@
         title.textContent = tileTitle(config);
         video.srcObject = config.stream;
         video.muted = config.muted;
+        ensureVideoPlayback(video);
         tile.classList.toggle("audio-muted", config.stream.getAudioTracks().length > 0 && !config.stream.getAudioTracks().some(t => t.enabled));
         resizeHandle.className = "resize-handle";
         resizeHandle.title = "Resize video";
@@ -839,6 +922,17 @@
         [...state.tiles.keys()]
             .filter((id) => id.startsWith(`${peerId}:`))
             .forEach((id) => removeTile(id));
+    }
+
+    function ensureVideoPlayback(video) {
+        const tryPlay = () => {
+            const playAttempt = video.play();
+            if (playAttempt && typeof playAttempt.catch === "function") playAttempt.catch(() => {});
+        };
+
+        video.addEventListener("loadedmetadata", tryPlay, { once: true });
+        video.addEventListener("canplay", tryPlay, { once: true });
+        tryPlay();
     }
 
     function focusTile(id) {
@@ -1198,10 +1292,23 @@
     function closeCallsForPeer(peerId) {
         for (const [key, call] of state.outboundCalls) {
             if (key.endsWith(`:${peerId}`)) {
+                clearMediaCallRetry(key);
                 call.close();
                 state.outboundCalls.delete(key);
             }
         }
+
+        for (const [key, call] of state.inboundCalls) {
+            if (key.endsWith(`:${peerId}`)) {
+                call.close();
+                state.inboundCalls.delete(key);
+            }
+        }
+    }
+
+    function splitCallKey(key) {
+        const separator = key.indexOf(":");
+        return [key.slice(0, separator), key.slice(separator + 1)];
     }
 
     function bindUi() {
@@ -1539,24 +1646,17 @@
                     { urls: "stun:stun.l.google.com:19302" },
                     { urls: "stun:stun1.l.google.com:19302" },
                     { urls: "stun:stun2.l.google.com:19302" },
-                    { urls: "stun:stun.services.mozilla.com" },
                     {
-                        urls: "turn:openrelay.metered.ca:80",
-                        username: "openrelayproject",
-                        credential: "openrelayproject"
-                    },
-                    {
-                        urls: "turn:openrelay.metered.ca:443",
-                        username: "openrelayproject",
-                        credential: "openrelayproject"
-                    },
-                    {
-                        urls: "turns:openrelay.metered.ca:443?transport=tcp",
-                        username: "openrelayproject",
-                        credential: "openrelayproject"
+                        urls: [
+                            "turn:pi.mckeown.in:45873?transport=udp",
+                            "turn:pi.mckeown.in:45873?transport=tcp"
+                        ],
+                        username: "jack",
+                        credential: "iWHaJ5MsaW7dFlvN2YuW+c0DPN+4eNNt"
                     }
                 ]
             }
         };
     }
+
 })();
