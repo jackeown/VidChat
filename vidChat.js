@@ -32,7 +32,8 @@
         zIndex: 1,
         unreadCount: 0,
         chatOpen: false,
-        chatHistory: []
+        chatHistory: [],
+        connectionSummaryTimer: null
     };
     const maxDataConnectionRetries = 4;
     const maxMediaCallRetries = 3;
@@ -79,6 +80,9 @@
         emojiAutocomplete: document.getElementById("emojiAutocomplete"),
         appSettingsButton: document.getElementById("appSettingsButton"),
         appSettingsModal: document.getElementById("appSettingsModal"),
+        connectionSummary: document.getElementById("connectionSummary"),
+        connectionSummaryMeta: document.getElementById("connectionSummaryMeta"),
+        refreshConnections: document.getElementById("refreshConnections"),
         displayName: document.getElementById("displayName"),
         brandName: document.getElementById("brandName"),
         chatNameInput: document.getElementById("chatNameInput"),
@@ -1311,6 +1315,211 @@
         return [key.slice(0, separator), key.slice(separator + 1)];
     }
 
+    async function updateConnectionSummary() {
+        if (!els.connectionSummary) return;
+
+        els.connectionSummaryMeta.textContent = "Refreshing WebRTC stats...";
+        const entries = collectConnectionEntries();
+        const summaries = await Promise.all(entries.map(readConnectionSummary));
+
+        els.connectionSummary.replaceChildren();
+
+        if (summaries.length === 0) {
+            const empty = document.createElement("p");
+            empty.className = "connection-empty";
+            empty.textContent = "No peer connections yet.";
+            els.connectionSummary.appendChild(empty);
+            els.connectionSummaryMeta.textContent = "Start or join a call to see connection routes.";
+            return;
+        }
+
+        summaries.forEach((summary) => els.connectionSummary.appendChild(renderConnectionSummary(summary)));
+        const relayed = summaries.filter((summary) => summary.route === "turn").length;
+        els.connectionSummaryMeta.textContent = `${summaries.length} connection${summaries.length === 1 ? "" : "s"}; ${relayed} using TURN relay.`;
+    }
+
+    function collectConnectionEntries() {
+        const entries = [];
+        const seen = new Set();
+
+        function add(label, peerId, kind, direction, source) {
+            const pc = findPeerConnection(source);
+            const key = pc || `${direction}:${kind}:${peerId}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            entries.push({ label, peerId, kind, direction, pc, source });
+        }
+
+        for (const [peerId, conn] of state.dataConnections) {
+            add("Data channel", peerId, "chat/data", "data", conn);
+        }
+
+        for (const [key, call] of state.outboundCalls) {
+            const [kind, peerId] = splitCallKey(key);
+            add(`${capitalize(kind)} sent`, peerId, kind, "outbound", call);
+        }
+
+        for (const [key, call] of state.inboundCalls) {
+            const [kind, peerId] = splitCallKey(key);
+            add(`${capitalize(kind)} received`, peerId, kind, "inbound", call);
+        }
+
+        return entries;
+    }
+
+    function findPeerConnection(source) {
+        if (!source) return null;
+        return source.peerConnection
+            || source._pc
+            || source.pc
+            || (source.provider && source.provider._pc)
+            || null;
+    }
+
+    async function readConnectionSummary(entry) {
+        const base = {
+            ...entry,
+            peerLabel: state.peerNames.get(entry.peerId) || shortPeer(entry.peerId),
+            route: "unknown",
+            state: "unknown",
+            iceState: "unknown",
+            local: null,
+            remote: null,
+            pair: null,
+            error: ""
+        };
+
+        if (!entry.pc || typeof entry.pc.getStats !== "function") {
+            return { ...base, error: "WebRTC stats are not exposed for this PeerJS connection." };
+        }
+
+        try {
+            const pairInfo = await selectedCandidatePair(entry.pc);
+            const route = candidateUsesTurn(pairInfo.local) || candidateUsesTurn(pairInfo.remote) ? "turn" : pairInfo.local || pairInfo.remote ? "direct" : "unknown";
+            return {
+                ...base,
+                route,
+                state: entry.pc.connectionState || entry.pc.iceConnectionState || "unknown",
+                iceState: entry.pc.iceConnectionState || "unknown",
+                local: pairInfo.local,
+                remote: pairInfo.remote,
+                pair: pairInfo.pair
+            };
+        } catch (error) {
+            return { ...base, error: error.message || "Could not read WebRTC stats." };
+        }
+    }
+
+    async function selectedCandidatePair(pc) {
+        const stats = await pc.getStats();
+        let pair = null;
+
+        stats.forEach((report) => {
+            if (report.type === "transport" && report.selectedCandidatePairId) {
+                pair = stats.get(report.selectedCandidatePairId) || pair;
+            }
+            if (report.type === "candidate-pair" && report.selected) {
+                pair = report;
+            }
+        });
+
+        if (!pair) {
+            stats.forEach((report) => {
+                if (report.type === "candidate-pair" && report.nominated && report.state === "succeeded") {
+                    pair = report;
+                }
+            });
+        }
+
+        return {
+            pair,
+            local: pair ? stats.get(pair.localCandidateId) || null : null,
+            remote: pair ? stats.get(pair.remoteCandidateId) || null : null
+        };
+    }
+
+    function renderConnectionSummary(summary) {
+        const item = document.createElement("article");
+        item.className = `connection-card ${summary.route}`;
+
+        const header = document.createElement("div");
+        header.className = "connection-card-header";
+
+        const titleWrap = document.createElement("div");
+        const title = document.createElement("h4");
+        const subtitle = document.createElement("p");
+        title.textContent = `${summary.peerLabel} - ${summary.label}`;
+        subtitle.textContent = `${capitalize(summary.direction)} ${summary.kind} connection`;
+        titleWrap.append(title, subtitle);
+
+        const badge = document.createElement("span");
+        badge.className = `route-badge ${summary.route}`;
+        badge.textContent = routeLabel(summary.route);
+        header.append(titleWrap, badge);
+
+        const grid = document.createElement("dl");
+        grid.className = "connection-detail-grid";
+        addDetail(grid, "State", `${summary.state} / ICE ${summary.iceState}`);
+        addDetail(grid, "Local", candidateLabel(summary.local));
+        addDetail(grid, "Remote", candidateLabel(summary.remote));
+        addDetail(grid, "Traffic", trafficLabel(summary.pair));
+        if (summary.error) addDetail(grid, "Stats", summary.error);
+
+        item.append(header, grid);
+        return item;
+    }
+
+    function addDetail(list, label, value) {
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+        term.textContent = label;
+        description.textContent = value;
+        list.append(term, description);
+    }
+
+    function routeLabel(route) {
+        if (route === "turn") return "TURN relay";
+        if (route === "direct") return "Direct";
+        return "Unknown";
+    }
+
+    function candidateLabel(candidate) {
+        if (!candidate) return "Not selected yet";
+        const type = candidate.candidateType || candidate.type || "unknown";
+        const protocol = candidate.protocol || "unknown";
+        const address = candidate.address || candidate.ip || candidate.url || "";
+        const port = candidate.port ? `:${candidate.port}` : "";
+        return `${type.toUpperCase()} over ${protocol.toUpperCase()}${address ? ` - ${address}${port}` : ""}`;
+    }
+
+    function trafficLabel(pair) {
+        if (!pair) return "No selected pair yet";
+        const sent = typeof pair.bytesSent === "number" ? formatBytes(pair.bytesSent) : "0 Bytes";
+        const received = typeof pair.bytesReceived === "number" ? formatBytes(pair.bytesReceived) : "0 Bytes";
+        const rtt = typeof pair.currentRoundTripTime === "number" ? `; RTT ${Math.round(pair.currentRoundTripTime * 1000)} ms` : "";
+        return `${sent} sent, ${received} received${rtt}`;
+    }
+
+    function candidateUsesTurn(candidate) {
+        return Boolean(candidate && (candidate.candidateType === "relay" || candidate.type === "relay"));
+    }
+
+    function capitalize(value) {
+        return value ? value.charAt(0).toUpperCase() + value.slice(1) : "";
+    }
+
+    function startConnectionSummaryUpdates() {
+        updateConnectionSummary();
+        if (state.connectionSummaryTimer) window.clearInterval(state.connectionSummaryTimer);
+        state.connectionSummaryTimer = window.setInterval(updateConnectionSummary, 3000);
+    }
+
+    function stopConnectionSummaryUpdates() {
+        if (!state.connectionSummaryTimer) return;
+        window.clearInterval(state.connectionSummaryTimer);
+        state.connectionSummaryTimer = null;
+    }
+
     function bindUi() {
         els.copyRoomLink.addEventListener("click", () => copyText(roomUrl(roomId), "Room link copied."));
         els.newRoom.addEventListener("click", () => {
@@ -1319,7 +1528,12 @@
         els.cameraToggle.addEventListener("click", toggleCamera);
         els.screenToggle.addEventListener("click", toggleScreen);
         els.screenAudioMute.addEventListener("click", toggleScreenAudioMute);
-        els.appSettingsButton.addEventListener("click", () => els.appSettingsModal.showModal());
+        els.appSettingsButton.addEventListener("click", () => {
+            startConnectionSummaryUpdates();
+            els.appSettingsModal.showModal();
+        });
+        els.appSettingsModal.addEventListener("close", stopConnectionSummaryUpdates);
+        els.refreshConnections.addEventListener("click", updateConnectionSummary);
         els.displayName.value = state.displayName;
         els.displayName.addEventListener("change", () => updateDisplayName(els.displayName.value));
         els.displayName.addEventListener("keydown", (event) => {
