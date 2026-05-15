@@ -31,6 +31,8 @@
         layout: "grid",
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
+        cameraRecoveryAttempts: 0,
+        cameraRecoveryTimer: null,
         focusedTileId: null,
         zIndex: 1,
         unreadCount: 0,
@@ -46,6 +48,18 @@
     const maxMediaCallRetries = 3;
     const fileChunkSize = 64 * 1024;
     const fileBackpressureLimit = 1024 * 1024;
+    const roomAdjectives = [
+        "amber", "brave", "bright", "calm", "clever", "cosmic", "crisp", "daring",
+        "electric", "frosty", "gentle", "golden", "hidden", "lucky", "lunar", "magic",
+        "merry", "neon", "nimble", "polar", "quiet", "rapid", "silver", "solar",
+        "steady", "swift", "vivid", "wild"
+    ];
+    const roomNouns = [
+        "atlas", "beacon", "bridge", "canyon", "comet", "cove", "ember", "forest",
+        "harbor", "lantern", "meadow", "meteor", "orbit", "pixel", "prairie", "quartz",
+        "river", "rocket", "summit", "tempo", "tower", "valley", "voyage", "wave",
+        "window", "zephyr"
+    ];
 
     const emojiAliasOverrides = {
         "100": "💯",
@@ -885,6 +899,7 @@
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            state.cameraRecoveryAttempts = 0;
             state.localStreams.set("camera", stream);
             addCameraTile(stream, false);
             sendLocalStreamToAll("camera", stream);
@@ -907,6 +922,7 @@
         if (stream) {
             stream.getTracks().forEach((track) => track.stop());
         }
+        clearLocalCameraRecovery();
 
         state.localStreams.delete("camera");
         state.previewStreams.delete("camera");
@@ -964,6 +980,79 @@
             local: true,
             preview
         });
+        if (!preview) scheduleLocalCameraRenderCheck(stream);
+    }
+
+    function scheduleLocalCameraRenderCheck(stream, delay = 1200) {
+        clearLocalCameraRecovery();
+        state.cameraRecoveryTimer = window.setTimeout(() => {
+            state.cameraRecoveryTimer = null;
+            checkLocalCameraRendering(stream);
+        }, delay);
+    }
+
+    function clearLocalCameraRecovery() {
+        if (!state.cameraRecoveryTimer) return;
+        window.clearTimeout(state.cameraRecoveryTimer);
+        state.cameraRecoveryTimer = null;
+    }
+
+    function checkLocalCameraRendering(stream) {
+        if (state.localStreams.get("camera") !== stream) return;
+
+        const video = localCameraVideo();
+        if (!video) return;
+        ensureVideoPlayback(video);
+
+        const hasLiveVideo = stream.getVideoTracks().some((track) => track.enabled && track.readyState === "live");
+        const isRendering = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0 && !video.paused;
+        if (!hasLiveVideo || isRendering) return;
+
+        if (state.cameraRecoveryAttempts === 0) {
+            state.cameraRecoveryAttempts += 1;
+            reattachVideoStream(video, stream);
+            scheduleLocalCameraRenderCheck(stream, 1400);
+            return;
+        }
+
+        if (state.cameraRecoveryAttempts === 1) {
+            state.cameraRecoveryAttempts += 1;
+            restartLocalCameraStream(stream);
+        }
+    }
+
+    function reattachVideoStream(video, stream) {
+        video.pause();
+        video.srcObject = null;
+        video.load();
+        video.srcObject = stream;
+        ensureVideoPlayback(video);
+    }
+
+    async function restartLocalCameraStream(oldStream) {
+        if (state.localStreams.get("camera") !== oldStream) return;
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            if (state.localStreams.get("camera") !== oldStream) {
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
+
+            oldStream.getTracks().forEach((track) => track.stop());
+            state.localStreams.set("camera", stream);
+            closeOutboundCalls("camera");
+            addCameraTile(stream, false);
+            sendLocalStreamToAll("camera", stream);
+            updateMediaButtons();
+        } catch (error) {
+            setStatus(`Camera recovery error: ${error.message}`);
+        }
+    }
+
+    function localCameraVideo() {
+        const tile = state.tiles.get(tileId("local", "camera"));
+        return tile ? tile.querySelector("video") : null;
     }
 
     function stopLocalStream(kind) {
@@ -1100,6 +1189,9 @@
         tile.style.zIndex = String(++state.zIndex);
         title.textContent = tileTitle(config);
         video.srcObject = config.stream;
+        video.autoplay = true;
+        video.setAttribute("autoplay", "");
+        video.setAttribute("playsinline", "");
         video.playsInline = true;
         video.muted = config.muted || muteForAutoplay;
         video.defaultMuted = video.muted;
@@ -2482,9 +2574,13 @@
     }
 
     function createRoomId() {
-        const bytes = new Uint8Array(6);
-        crypto.getRandomValues(bytes);
-        return [...bytes].map((byte) => byte.toString(36).padStart(2, "0")).join("").slice(0, 10);
+        return `${randomRoomWord(roomAdjectives)}-${randomRoomWord(roomNouns)}`;
+    }
+
+    function randomRoomWord(words) {
+        const values = new Uint32Array(1);
+        crypto.getRandomValues(values);
+        return words[values[0] % words.length];
     }
 
     function ensureDisplayName() {
