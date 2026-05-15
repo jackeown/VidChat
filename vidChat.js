@@ -41,6 +41,7 @@
         outgoingFiles: new Map()
     };
     const pendingRemoteAudioElements = new Set();
+    const boundRemoteAudioTracks = new WeakSet();
     const maxDataConnectionRetries = 4;
     const maxMediaCallRetries = 3;
     const fileChunkSize = 64 * 1024;
@@ -94,6 +95,8 @@
         displayName: document.getElementById("displayName"),
         brandName: document.getElementById("brandName"),
         chatNameInput: document.getElementById("chatNameInput"),
+        customRoomId: document.getElementById("customRoomId"),
+        openCustomRoom: document.getElementById("openCustomRoom"),
         bgColorInput: document.getElementById("bgColorInput"),
         bgImageInput: document.getElementById("bgImageInput"),
         clearBgImage: document.getElementById("clearBgImage"),
@@ -1104,8 +1107,9 @@
         video.dataset.remoteAudioMutedForAutoplay = muteForAutoplay ? "true" : "false";
         ensureVideoPlayback(video);
         if (muteForAutoplay) {
-            pendingRemoteAudioElements.add(video);
+            queueRemoteAudioUnlock(video, false);
         }
+        if (isRemote) bindRemoteAudioTrackEvents(config.stream, video);
         tile.classList.toggle("audio-muted", config.stream.getAudioTracks().length > 0 && !config.stream.getAudioTracks().some(t => t.enabled));
         resizeHandle.className = "resize-handle";
         resizeHandle.title = "Resize video";
@@ -1161,6 +1165,7 @@
         }
         resolveOverlaps();
         applyFocus();
+        syncFullscreenSelfView();
     }
 
     function toggleTracks(tracks) {
@@ -1277,9 +1282,7 @@
                     pendingRemoteAudioElements.delete(video);
                     video.dataset.remoteAudioMutedForAutoplay = "false";
                 } else {
-                    video.dataset.remoteAudioMutedForAutoplay = "true";
-                    pendingRemoteAudioElements.add(video);
-                    setRemotePlaybackPrompt(video, "audio");
+                    queueRemoteAudioUnlock(video);
                     unlockRemoteAudio();
                 }
             });
@@ -1317,6 +1320,7 @@
         state.tileConfigs.delete(id);
         if (state.focusedTileId === id) state.focusedTileId = null;
         applyFocus();
+        syncFullscreenSelfView();
     }
 
     function removePeerTiles(peerId) {
@@ -1388,6 +1392,33 @@
         }
     }
 
+    function queueRemoteAudioUnlock(video, showPrompt = true) {
+        if (!video || video.dataset.remoteMedia !== "true" || video.volume === 0) return;
+        video.dataset.remoteAudioMutedForAutoplay = "true";
+        pendingRemoteAudioElements.add(video);
+        if (showPrompt && video.muted) setRemotePlaybackPrompt(video, "audio");
+    }
+
+    function bindRemoteAudioTrackEvents(stream, video) {
+        stream.getAudioTracks().forEach((track) => bindRemoteAudioTrack(track, video));
+        stream.addEventListener("addtrack", (event) => {
+            if (!event.track || event.track.kind !== "audio") return;
+            bindRemoteAudioTrack(event.track, video);
+            queueRemoteAudioUnlock(video);
+            unlockRemoteAudio();
+        });
+    }
+
+    function bindRemoteAudioTrack(track, video) {
+        if (track.kind !== "audio" || boundRemoteAudioTracks.has(track)) return;
+        boundRemoteAudioTracks.add(track);
+        track.addEventListener("unmute", () => {
+            queueRemoteAudioUnlock(video);
+            unlockRemoteAudio();
+        });
+        track.addEventListener("ended", () => updateRemotePlaybackPrompt(video));
+    }
+
     function createRemotePlaybackOverlay(video) {
         const overlay = document.createElement("button");
         overlay.type = "button";
@@ -1396,7 +1427,7 @@
             event.preventDefault();
             event.stopPropagation();
             if (video.dataset.remoteAudioMutedForAutoplay === "true") {
-                pendingRemoteAudioElements.add(video);
+                queueRemoteAudioUnlock(video);
                 unlockRemoteAudio();
             }
             ensureVideoPlayback(video);
@@ -1448,6 +1479,7 @@
                 }
                 tile.classList.toggle("expanded", !alreadyExpanded);
                 if (!alreadyExpanded) bringToFront(tile);
+                syncFullscreenSelfView(tile.classList.contains("expanded") ? tile : null);
             });
         }
     }
@@ -1457,7 +1489,57 @@
         for (const tile of state.tiles.values()) {
             tile.classList.toggle("expanded", tile === full);
         }
+        syncFullscreenSelfView(full);
     });
+
+    function syncFullscreenSelfView(activeTile = currentExpandedTile()) {
+        for (const tile of state.tiles.values()) {
+            if (tile !== activeTile) removeSelfView(tile);
+        }
+
+        if (!activeTile || activeTile.classList.contains("local-camera")) {
+            if (activeTile) removeSelfView(activeTile);
+            return;
+        }
+
+        const localStream = state.localStreams.get("camera");
+        if (!localStream || !localStream.getVideoTracks().some((track) => track.enabled && track.readyState === "live")) {
+            removeSelfView(activeTile);
+            return;
+        }
+
+        let selfView = activeTile.querySelector(".fullscreen-self-view");
+        let video = selfView && selfView.querySelector("video");
+        if (!selfView) {
+            selfView = document.createElement("div");
+            selfView.className = "fullscreen-self-view";
+            video = document.createElement("video");
+            video.autoplay = true;
+            video.muted = true;
+            video.defaultMuted = true;
+            video.playsInline = true;
+            const label = document.createElement("span");
+            label.textContent = "You";
+            selfView.append(video, label);
+            activeTile.appendChild(selfView);
+        }
+
+        if (video.srcObject !== localStream) video.srcObject = localStream;
+        selfView.classList.toggle("mirrored", state.mirrorLocalCamera);
+        ensureVideoPlayback(video);
+    }
+
+    function currentExpandedTile() {
+        if (document.fullscreenElement && document.fullscreenElement.classList.contains("video-tile")) {
+            return document.fullscreenElement;
+        }
+        return [...state.tiles.values()].find((tile) => tile.classList.contains("expanded")) || null;
+    }
+
+    function removeSelfView(tile) {
+        const selfView = tile && tile.querySelector(".fullscreen-self-view");
+        if (selfView) selfView.remove();
+    }
 
     function applyFocus() {
         for (const [id, tile] of state.tiles) {
@@ -1886,15 +1968,17 @@
             local: null,
             remote: null,
             pair: null,
+            audio: null,
             error: ""
         };
 
         if (!entry.pc || typeof entry.pc.getStats !== "function") {
-            return { ...base, error: "WebRTC stats are not exposed for this PeerJS connection." };
+            return { ...base, audio: mediaAudioSummary(entry, null), error: "WebRTC stats are not exposed for this PeerJS connection." };
         }
 
         try {
-            const pairInfo = await selectedCandidatePair(entry.pc);
+            const stats = await entry.pc.getStats();
+            const pairInfo = selectedCandidatePair(stats);
             const route = candidateUsesTurn(pairInfo.local) || candidateUsesTurn(pairInfo.remote) ? "turn" : pairInfo.local || pairInfo.remote ? "direct" : "unknown";
             return {
                 ...base,
@@ -1903,15 +1987,15 @@
                 iceState: entry.pc.iceConnectionState || "unknown",
                 local: pairInfo.local,
                 remote: pairInfo.remote,
-                pair: pairInfo.pair
+                pair: pairInfo.pair,
+                audio: mediaAudioSummary(entry, stats)
             };
         } catch (error) {
-            return { ...base, error: error.message || "Could not read WebRTC stats." };
+            return { ...base, audio: mediaAudioSummary(entry, null), error: error.message || "Could not read WebRTC stats." };
         }
     }
 
-    async function selectedCandidatePair(pc) {
-        const stats = await pc.getStats();
+    function selectedCandidatePair(stats) {
         let pair = null;
 
         stats.forEach((report) => {
@@ -1963,6 +2047,7 @@
         addDetail(grid, "Local", candidateLabel(summary.local));
         addDetail(grid, "Remote", candidateLabel(summary.remote));
         addDetail(grid, "Traffic", trafficLabel(summary.pair));
+        if (summary.audio) addDetail(grid, summary.audio.label, summary.audio.value);
         if (summary.error) addDetail(grid, "Stats", summary.error);
 
         item.append(header, grid);
@@ -2000,6 +2085,53 @@
         return `${sent} sent, ${received} received${rtt}`;
     }
 
+    function mediaAudioSummary(entry, stats) {
+        if (entry.direction !== "inbound" || (entry.kind !== "camera" && entry.kind !== "screen")) return null;
+
+        const config = state.tileConfigs.get(tileId(entry.peerId, entry.kind));
+        const stream = config && config.stream;
+        const tracks = stream ? stream.getAudioTracks() : [];
+        const audioStats = inboundAudioStats(stats);
+        const video = mediaElementForTile(entry.peerId, entry.kind);
+
+        if (!tracks.length) {
+            return audioStats
+                ? { label: "Audio received", value: `No rendered audio track; RTP has ${formatBytes(audioStats.bytesReceived || 0)} received` }
+                : { label: "Audio received", value: "No audio track on this stream" };
+        }
+
+        const liveTracks = tracks.filter((track) => track.readyState === "live").length;
+        const enabledTracks = tracks.filter((track) => track.enabled).length;
+        const packets = audioStats && typeof audioStats.packetsReceived === "number" ? audioStats.packetsReceived : 0;
+        const bytes = audioStats && typeof audioStats.bytesReceived === "number" ? audioStats.bytesReceived : 0;
+        const transport = audioStats
+            ? packets > 0 || bytes > 0 ? `RTP receiving ${formatBytes(bytes)}` : "RTP selected, no audio packets yet"
+            : "No inbound audio RTP stats yet";
+        const playback = video
+            ? video.muted ? "playback muted or waiting for click" : video.paused ? "video element paused" : "playback unmuted"
+            : "no video element";
+
+        return {
+            label: "Audio received",
+            value: `${enabledTracks}/${tracks.length} enabled, ${liveTracks}/${tracks.length} live; ${transport}; ${playback}`
+        };
+    }
+
+    function inboundAudioStats(stats) {
+        if (!stats) return null;
+        let best = null;
+        stats.forEach((report) => {
+            if (report.type !== "inbound-rtp" || report.kind !== "audio") return;
+            if (!best || (report.bytesReceived || 0) > (best.bytesReceived || 0)) best = report;
+        });
+        return best;
+    }
+
+    function mediaElementForTile(peerId, kind) {
+        const tile = state.tiles.get(tileId(peerId, kind));
+        return tile ? tile.querySelector("video") : null;
+    }
+
     function candidateUsesTurn(candidate) {
         return Boolean(candidate && (candidate.candidateType === "relay" || candidate.type === "relay"));
     }
@@ -2022,6 +2154,7 @@
 
     function bindUi() {
         document.addEventListener("pointerdown", unlockRemoteAudio, true);
+        document.addEventListener("click", unlockRemoteAudio, true);
         document.addEventListener("keydown", unlockRemoteAudio, true);
         document.addEventListener("touchstart", unlockRemoteAudio, true);
         els.copyRoomLink.addEventListener("click", () => copyText(roomUrl(roomId), "Room link copied."));
@@ -2053,6 +2186,19 @@
             localStorage.setItem("vidChatChatName", state.chatName);
             applyChatName();
         });
+
+        els.customRoomId.value = roomId;
+        els.customRoomId.addEventListener("input", () => {
+            const sanitized = sanitizeRoomId(els.customRoomId.value);
+            els.openCustomRoom.disabled = !sanitized || sanitized === roomId;
+        });
+        els.customRoomId.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            openCustomRoom();
+        });
+        els.openCustomRoom.addEventListener("click", openCustomRoom);
+        els.openCustomRoom.disabled = true;
 
         els.bgColorInput.value = state.bgColor;
         els.bgColorInput.addEventListener("input", () => {
@@ -2175,6 +2321,7 @@
             for (const tile of state.tiles.values()) {
                 tile.classList.remove("expanded");
             }
+            syncFullscreenSelfView(null);
         });
     }
 
@@ -2184,6 +2331,7 @@
 
     function applyMirrorSetting() {
         els.videos.classList.toggle("mirror-local-camera", state.mirrorLocalCamera);
+        syncFullscreenSelfView();
     }
 
     function applyChatName() {
@@ -2241,6 +2389,21 @@
         els.displayName.value = nextName;
         broadcast({ type: "name-changed", displayName: nextName });
         setStatus(`Name updated to ${nextName}.`);
+    }
+
+    function openCustomRoom() {
+        const nextRoomId = sanitizeRoomId(els.customRoomId.value);
+        if (!nextRoomId) {
+            setStatus("Enter a room ID with letters, numbers, or spaces.");
+            return;
+        }
+        if (nextRoomId === roomId) {
+            els.openCustomRoom.disabled = true;
+            setStatus(`Already in room ${roomId}.`);
+            return;
+        }
+
+        window.location.href = roomUrl(nextRoomId);
     }
 
     function setPeerName(peerId, displayName) {
@@ -2341,7 +2504,13 @@
 
     function sanitizeRoomId(value) {
         if (!value) return "";
-        return value.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 48);
+        return String(value)
+            .toLowerCase()
+            .trim()
+            .replace(/['"]/g, "")
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "")
+            .slice(0, 48);
     }
 
     function peerOptions() {
