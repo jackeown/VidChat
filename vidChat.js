@@ -8,7 +8,10 @@
     const roomPeerId = `vidchat-room-${roomId}`;
     const state = {
         peer: null,
+        coordinatorPeer: null,
+        coordinatorClaimTimer: null,
         isHost: false,
+        autoCameraAttempted: false,
         previewStreams: new Map(),
         localStreams: new Map(),
         outboundCalls: new Map(),
@@ -115,43 +118,72 @@
 
     async function startRoom() {
         setStatus("Opening room...");
-        const hostPeer = new Peer(roomPeerId, peerOptions());
+        const peer = new Peer(undefined, peerOptions());
 
-        hostPeer.on("open", () => {
-            state.peer = hostPeer;
-            state.isHost = true;
-            bindPeer(hostPeer);
-            setStatus(`Room ready. You are hosting as ${hostPeer.id}.`);
+        peer.on("open", () => {
+            state.peer = peer;
+            bindPeer(peer);
+            setStatus(`Connected as ${peer.id}. Opening room...`);
+            scheduleCoordinatorClaim(0);
+            startCameraAfterConnection();
         });
 
-        hostPeer.on("error", (error) => {
-            if (error.type === "unavailable-id") {
-                hostPeer.destroy();
-                joinRoom();
-                return;
-            }
+        peer.on("error", (error) => {
             setStatus(`Peer error: ${error.message || error.type}`);
         });
     }
 
-    function joinRoom() {
-        setStatus("Joining room...");
-        const guestPeer = new Peer(undefined, peerOptions());
-        guestPeer.on("open", () => {
-            state.peer = guestPeer;
-            bindPeer(guestPeer);
-            connectData(roomPeerId, true);
-            setStatus(`Connected as ${guestPeer.id}. Waiting for peers...`);
+    function scheduleCoordinatorClaim(delay) {
+        if (!state.peer || state.isHost || state.coordinatorPeer || state.coordinatorClaimTimer) return;
+
+        state.coordinatorClaimTimer = window.setTimeout(() => {
+            state.coordinatorClaimTimer = null;
+            claimCoordinator();
+        }, delay);
+    }
+
+    function claimCoordinator() {
+        if (!state.peer || state.isHost || state.coordinatorPeer) return;
+
+        const coordinatorPeer = new Peer(roomPeerId, peerOptions());
+        coordinatorPeer.on("open", () => {
+            state.coordinatorPeer = coordinatorPeer;
+            state.isHost = true;
+            bindCoordinatorPeer(coordinatorPeer);
+            broadcast({ type: "coordinator-changed", peerId: state.peer.id });
+            updatePeerStatus();
         });
-        guestPeer.on("error", (error) => {
-            setStatus(`Peer error: ${error.message || error.type}`);
+        coordinatorPeer.on("error", (error) => {
+            coordinatorPeer.destroy();
+            if (state.coordinatorPeer === coordinatorPeer) state.coordinatorPeer = null;
+            state.isHost = false;
+            if (error.type === "unavailable-id") {
+                connectData(roomPeerId, true);
+                return;
+            }
+            setStatus(`Room coordinator error: ${error.message || error.type}`);
+        });
+        coordinatorPeer.on("close", () => {
+            if (state.coordinatorPeer !== coordinatorPeer) return;
+            state.coordinatorPeer = null;
+            state.isHost = false;
+            scheduleCoordinatorClaim(randomCoordinatorDelay());
+            updatePeerStatus();
         });
     }
 
     function bindPeer(peer) {
         peer.on("connection", (conn) => registerConnection(conn));
         peer.on("call", handleIncomingCall);
-        peer.on("disconnected", () => setStatus("Disconnected from PeerJS. Reconnecting..."));
+        peer.on("disconnected", () => {
+            setStatus("Disconnected from PeerJS. Reconnecting...");
+            peer.reconnect();
+        });
+    }
+
+    function bindCoordinatorPeer(peer) {
+        peer.on("connection", (conn) => registerConnection(conn, true));
+        peer.on("call", handleIncomingCall);
     }
 
     function handleIncomingCall(call) {
@@ -177,7 +209,7 @@
         removeTile(tileId(peerId, kind));
     }
 
-    function registerConnection(conn) {
+    function registerConnection(conn, coordinatorConnection = false) {
         if (state.dataConnections.has(conn.peer)) {
             const oldConn = state.dataConnections.get(conn.peer);
             if (oldConn.open) oldConn.close();
@@ -188,9 +220,9 @@
             clearDataConnectionRetry(conn.peer);
             conn.send({ type: "hello", peerId: state.peer.id, displayName: state.displayName });
 
-            if (state.isHost) {
-                const roster = [...state.dataConnections.keys()].filter((id) => id !== conn.peer);
-                conn.send({ type: "welcome", roomId, peers: roster, history: state.chatHistory });
+            if (state.isHost && coordinatorConnection) {
+                const roster = roomRoster(conn.peer);
+                conn.send({ type: "welcome", roomId, peers: roster, history: state.chatHistory, coordinatorPeerId: state.peer.id });
                 broadcast({ type: "peer-joined", peerId: conn.peer }, conn.peer);
             }
 
@@ -206,7 +238,10 @@
             failIncomingFilesForPeer(conn.peer, "Transfer interrupted.");
             failOutgoingFilesForPeer(conn.peer, "Peer disconnected during transfer.");
             removePeerTiles(conn.peer);
-            if (state.isHost) broadcast({ type: "peer-left", peerId: conn.peer });
+            if (state.isHost && coordinatorConnection) broadcast({ type: "peer-left", peerId: conn.peer });
+            if (conn.peer === roomPeerId) {
+                scheduleCoordinatorClaim(randomCoordinatorDelay());
+            }
             updatePeerStatus();
         });
         conn.on("error", () => {
@@ -214,6 +249,9 @@
             state.dataConnections.delete(conn.peer);
             failIncomingFilesForPeer(conn.peer, "Transfer failed.");
             failOutgoingFilesForPeer(conn.peer, "Peer connection failed during transfer.");
+            if (conn.peer === roomPeerId) {
+                scheduleCoordinatorClaim(randomCoordinatorDelay());
+            }
             updatePeerStatus();
         });
     }
@@ -241,6 +279,12 @@
                     }
                 });
             }
+            return;
+        }
+
+        if (message.type === "coordinator-changed") {
+            if (message.peerId && message.peerId !== state.peer.id) connectData(roomPeerId, false);
+            updatePeerStatus();
             return;
         }
 
@@ -793,6 +837,7 @@
         registerConnection(conn);
         conn.on("error", () => {
             if (required) setStatus("The room is not reachable yet. Check the link or try again.");
+            if (peerId === roomPeerId) scheduleCoordinatorClaim(randomCoordinatorDelay());
             scheduleDataConnectionRetry(peerId, required);
         });
     }
@@ -801,7 +846,10 @@
         if (!peerId || state.dataConnections.has(peerId) || state.dataRetryTimers.has(peerId)) return;
 
         const attempt = (state.dataRetryAttempts.get(peerId) || 0) + 1;
-        if (attempt > maxDataConnectionRetries) return;
+        if (attempt > maxDataConnectionRetries) {
+            if (peerId === roomPeerId) scheduleCoordinatorClaim(randomCoordinatorDelay());
+            return;
+        }
 
         state.dataRetryAttempts.set(peerId, attempt);
         const delay = Math.min(8000, 600 * (2 ** (attempt - 1)));
@@ -843,6 +891,12 @@
         } finally {
             updateMediaButtons();
         }
+    }
+
+    function startCameraAfterConnection() {
+        if (state.autoCameraAttempted || state.localStreams.has("camera") || state.previewStreams.has("camera")) return;
+        state.autoCameraAttempted = true;
+        startAndShareCamera();
     }
 
     function stopFullCamera() {
@@ -1727,6 +1781,18 @@
         }
     }
 
+    function roomRoster(exceptPeerId) {
+        const peers = new Set(state.dataConnections.keys());
+        peers.delete(exceptPeerId);
+        peers.delete(roomPeerId);
+        peers.delete(state.peer && state.peer.id);
+        return [...peers];
+    }
+
+    function randomCoordinatorDelay() {
+        return 500 + Math.floor(Math.random() * 1200);
+    }
+
     function closeCallsForPeer(peerId) {
         for (const [key, call] of state.outboundCalls) {
             if (key.endsWith(`:${peerId}`)) {
@@ -2209,8 +2275,8 @@
     }
 
     function updatePeerStatus() {
-        const count = state.dataConnections.size;
-        const role = state.isHost ? "hosting" : "connected";
+        const count = [...state.dataConnections.keys()].filter((peerId) => peerId !== roomPeerId).length;
+        const role = state.isHost ? "coordinating room" : "connected";
         setStatus(`${role}; ${count} peer${count === 1 ? "" : "s"} in direct reach.`);
     }
 
@@ -2236,7 +2302,7 @@
     }
 
     function shortPeer(peerId) {
-        if (peerId === roomPeerId) return "Host";
+        if (peerId === roomPeerId) return "Room";
         return peerId.length > 12 ? `${peerId.slice(0, 6)}...${peerId.slice(-4)}` : peerId;
     }
 
