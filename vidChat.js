@@ -37,6 +37,7 @@
         incomingFiles: new Map(),
         outgoingFiles: new Map()
     };
+    const pendingRemoteAudioElements = new Set();
     const maxDataConnectionRetries = 4;
     const maxMediaCallRetries = 3;
     const fileChunkSize = 64 * 1024;
@@ -1031,6 +1032,8 @@
         const title = fragment.querySelector(".tile-title");
         const settingsButton = fragment.querySelector(".tile-settings-button");
         const resizeHandle = document.createElement("span");
+        const hasRemoteAudio = !config.local && config.stream.getAudioTracks().length > 0;
+        const muteForAutoplay = hasRemoteAudio;
 
         tile.dataset.tileId = config.id;
         tile.classList.add(config.kind);
@@ -1039,8 +1042,13 @@
         tile.style.zIndex = String(++state.zIndex);
         title.textContent = tileTitle(config);
         video.srcObject = config.stream;
-        video.muted = config.muted;
+        video.muted = config.muted || muteForAutoplay;
+        video.defaultMuted = video.muted;
+        video.dataset.remoteAudioMutedForAutoplay = muteForAutoplay ? "true" : "false";
         ensureVideoPlayback(video);
+        if (muteForAutoplay) {
+            pendingRemoteAudioElements.add(video);
+        }
         tile.classList.toggle("audio-muted", config.stream.getAudioTracks().length > 0 && !config.stream.getAudioTracks().some(t => t.enabled));
         resizeHandle.className = "resize-handle";
         resizeHandle.title = "Resize video";
@@ -1082,6 +1090,7 @@
         els.videos.appendChild(fragment);
         state.tiles.set(config.id, tile);
         state.tileConfigs.set(config.id, config);
+        if (muteForAutoplay) unlockRemoteAudio();
         updateLocalTileState(config.id);
         if (oldFrame && oldFrame.placed) {
             setTileFrame(tile, oldFrame.x, oldFrame.y, oldFrame.width, oldFrame.height);
@@ -1202,6 +1211,14 @@
             volume.addEventListener("input", () => {
                 video.volume = Number(volume.value);
                 video.muted = video.volume === 0;
+                if (video.muted) {
+                    pendingRemoteAudioElements.delete(video);
+                    video.dataset.remoteAudioMutedForAutoplay = "false";
+                } else {
+                    video.dataset.remoteAudioMutedForAutoplay = "true";
+                    pendingRemoteAudioElements.add(video);
+                    unlockRemoteAudio();
+                }
             });
 
             volumeLabel.append(volumeText, volume);
@@ -1230,6 +1247,8 @@
     function removeTile(id) {
         const tile = state.tiles.get(id);
         if (!tile) return;
+        const video = tile.querySelector("video");
+        if (video) pendingRemoteAudioElements.delete(video);
         tile.remove();
         state.tiles.delete(id);
         state.tileConfigs.delete(id);
@@ -1246,12 +1265,48 @@
     function ensureVideoPlayback(video) {
         const tryPlay = () => {
             const playAttempt = video.play();
-            if (playAttempt && typeof playAttempt.catch === "function") playAttempt.catch(() => {});
+            if (playAttempt && typeof playAttempt.catch === "function") {
+                playAttempt.catch(() => {
+                    if (video.dataset.remoteAudioMutedForAutoplay !== "true") return;
+                    video.muted = true;
+                    pendingRemoteAudioElements.add(video);
+                    video.play().catch(() => {});
+                });
+            }
         };
 
         video.addEventListener("loadedmetadata", tryPlay, { once: true });
         video.addEventListener("canplay", tryPlay, { once: true });
         tryPlay();
+    }
+
+    function unlockRemoteAudio() {
+        for (const video of [...pendingRemoteAudioElements]) {
+            if (!video.isConnected) continue;
+            if (video.volume === 0) {
+                pendingRemoteAudioElements.delete(video);
+                continue;
+            }
+
+            video.muted = false;
+            video.defaultMuted = false;
+            const playAttempt = video.play();
+            if (!playAttempt || typeof playAttempt.catch !== "function") {
+                pendingRemoteAudioElements.delete(video);
+                video.dataset.remoteAudioMutedForAutoplay = "false";
+                continue;
+            }
+
+            playAttempt
+                .then(() => {
+                    pendingRemoteAudioElements.delete(video);
+                    video.dataset.remoteAudioMutedForAutoplay = "false";
+                })
+                .catch(() => {
+                    video.muted = true;
+                    video.play().catch(() => {});
+                });
+        }
     }
 
     function focusTile(id) {
@@ -1836,6 +1891,9 @@
     }
 
     function bindUi() {
+        document.addEventListener("pointerdown", unlockRemoteAudio, true);
+        document.addEventListener("keydown", unlockRemoteAudio, true);
+        document.addEventListener("touchstart", unlockRemoteAudio, true);
         els.copyRoomLink.addEventListener("click", () => copyText(roomUrl(roomId), "Room link copied."));
         els.newRoom.addEventListener("click", () => {
             window.location.href = roomUrl(createRoomId());
