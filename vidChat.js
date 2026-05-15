@@ -3,6 +3,19 @@
         throw new Error("PeerJS is required for MeliChat.");
     }
 
+    const roomAdjectives = [
+        "amber", "brave", "bright", "calm", "clever", "cosmic", "crisp", "daring",
+        "electric", "frosty", "gentle", "golden", "hidden", "lucky", "lunar", "magic",
+        "merry", "neon", "nimble", "polar", "quiet", "rapid", "silver", "solar",
+        "steady", "swift", "vivid", "wild"
+    ];
+    const roomNouns = [
+        "atlas", "beacon", "bridge", "canyon", "comet", "cove", "ember", "forest",
+        "harbor", "lantern", "meadow", "meteor", "orbit", "pixel", "prairie", "quartz",
+        "river", "rocket", "summit", "tempo", "tower", "valley", "voyage", "wave",
+        "window", "zephyr"
+    ];
+
     const qs = new URLSearchParams(window.location.search);
     const roomId = sanitizeRoomId(qs.get("room")) || createRoomId();
     const roomPeerId = `vidchat-room-${roomId}`;
@@ -48,19 +61,6 @@
     const maxMediaCallRetries = 3;
     const fileChunkSize = 64 * 1024;
     const fileBackpressureLimit = 1024 * 1024;
-    const roomAdjectives = [
-        "amber", "brave", "bright", "calm", "clever", "cosmic", "crisp", "daring",
-        "electric", "frosty", "gentle", "golden", "hidden", "lucky", "lunar", "magic",
-        "merry", "neon", "nimble", "polar", "quiet", "rapid", "silver", "solar",
-        "steady", "swift", "vivid", "wild"
-    ];
-    const roomNouns = [
-        "atlas", "beacon", "bridge", "canyon", "comet", "cove", "ember", "forest",
-        "harbor", "lantern", "meadow", "meteor", "orbit", "pixel", "prairie", "quartz",
-        "river", "rocket", "summit", "tempo", "tower", "valley", "voyage", "wave",
-        "window", "zephyr"
-    ];
-
     const emojiAliasOverrides = {
         "100": "💯",
         angry: "😠",
