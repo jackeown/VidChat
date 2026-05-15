@@ -1032,7 +1032,8 @@
         const title = fragment.querySelector(".tile-title");
         const settingsButton = fragment.querySelector(".tile-settings-button");
         const resizeHandle = document.createElement("span");
-        const hasRemoteAudio = !config.local && config.stream.getAudioTracks().length > 0;
+        const isRemote = !config.local;
+        const hasRemoteAudio = isRemote && config.stream.getAudioTracks().length > 0;
         const muteForAutoplay = hasRemoteAudio;
 
         tile.dataset.tileId = config.id;
@@ -1042,8 +1043,10 @@
         tile.style.zIndex = String(++state.zIndex);
         title.textContent = tileTitle(config);
         video.srcObject = config.stream;
+        video.playsInline = true;
         video.muted = config.muted || muteForAutoplay;
         video.defaultMuted = video.muted;
+        video.dataset.remoteMedia = isRemote ? "true" : "false";
         video.dataset.remoteAudioMutedForAutoplay = muteForAutoplay ? "true" : "false";
         ensureVideoPlayback(video);
         if (muteForAutoplay) {
@@ -1086,10 +1089,15 @@
             tile.appendChild(previewOverlay);
         }
 
+        if (isRemote) {
+            tile.appendChild(createRemotePlaybackOverlay(video));
+        }
+
         tile.appendChild(resizeHandle);
         els.videos.appendChild(fragment);
         state.tiles.set(config.id, tile);
         state.tileConfigs.set(config.id, config);
+        ensureVideoPlayback(video);
         if (muteForAutoplay) unlockRemoteAudio();
         updateLocalTileState(config.id);
         if (oldFrame && oldFrame.placed) {
@@ -1217,6 +1225,7 @@
                 } else {
                     video.dataset.remoteAudioMutedForAutoplay = "true";
                     pendingRemoteAudioElements.add(video);
+                    setRemotePlaybackPrompt(video, "audio");
                     unlockRemoteAudio();
                 }
             });
@@ -1265,13 +1274,25 @@
     function ensureVideoPlayback(video) {
         const tryPlay = () => {
             const playAttempt = video.play();
+            if (!playAttempt || typeof playAttempt.catch !== "function") {
+                updateRemotePlaybackPrompt(video);
+                return;
+            }
             if (playAttempt && typeof playAttempt.catch === "function") {
-                playAttempt.catch(() => {
-                    if (video.dataset.remoteAudioMutedForAutoplay !== "true") return;
-                    video.muted = true;
-                    pendingRemoteAudioElements.add(video);
-                    video.play().catch(() => {});
-                });
+                playAttempt
+                    .then(() => updateRemotePlaybackPrompt(video))
+                    .catch(() => {
+                        if (video.dataset.remoteMedia !== "true") return;
+                        video.muted = true;
+                        const mutedPlayAttempt = video.play();
+                        if (!mutedPlayAttempt || typeof mutedPlayAttempt.catch !== "function") {
+                            updateRemotePlaybackPrompt(video);
+                            return;
+                        }
+                        mutedPlayAttempt
+                            .then(() => updateRemotePlaybackPrompt(video))
+                            .catch(() => setRemotePlaybackPrompt(video, "media"));
+                    });
             }
         };
 
@@ -1285,6 +1306,7 @@
             if (!video.isConnected) continue;
             if (video.volume === 0) {
                 pendingRemoteAudioElements.delete(video);
+                setRemotePlaybackPrompt(video, "");
                 continue;
             }
 
@@ -1294,6 +1316,7 @@
             if (!playAttempt || typeof playAttempt.catch !== "function") {
                 pendingRemoteAudioElements.delete(video);
                 video.dataset.remoteAudioMutedForAutoplay = "false";
+                setRemotePlaybackPrompt(video, "");
                 continue;
             }
 
@@ -1301,12 +1324,53 @@
                 .then(() => {
                     pendingRemoteAudioElements.delete(video);
                     video.dataset.remoteAudioMutedForAutoplay = "false";
+                    setRemotePlaybackPrompt(video, "");
                 })
                 .catch(() => {
                     video.muted = true;
-                    video.play().catch(() => {});
+                    setRemotePlaybackPrompt(video, "audio");
+                    ensureVideoPlayback(video);
                 });
         }
+    }
+
+    function createRemotePlaybackOverlay(video) {
+        const overlay = document.createElement("button");
+        overlay.type = "button";
+        overlay.className = "remote-playback-overlay hidden";
+        overlay.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (video.dataset.remoteAudioMutedForAutoplay === "true") {
+                pendingRemoteAudioElements.add(video);
+                unlockRemoteAudio();
+            }
+            ensureVideoPlayback(video);
+        });
+        return overlay;
+    }
+
+    function updateRemotePlaybackPrompt(video) {
+        if (video.dataset.remoteMedia !== "true") return;
+        if (video.paused) {
+            setRemotePlaybackPrompt(video, "media");
+            return;
+        }
+        if (video.dataset.remoteAudioMutedForAutoplay === "true" && video.muted && video.volume > 0) {
+            setRemotePlaybackPrompt(video, "audio");
+            return;
+        }
+        setRemotePlaybackPrompt(video, "");
+    }
+
+    function setRemotePlaybackPrompt(video, mode) {
+        const tile = video.closest(".video-tile");
+        const overlay = tile ? tile.querySelector(".remote-playback-overlay") : null;
+        if (!overlay) return;
+
+        overlay.classList.toggle("hidden", !mode);
+        overlay.classList.toggle("audio-only", mode === "audio");
+        overlay.textContent = mode === "media" ? "Click to start video and audio" : mode === "audio" ? "Click for audio" : "";
     }
 
     function focusTile(id) {
