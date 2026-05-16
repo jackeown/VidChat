@@ -1995,9 +1995,7 @@
         const audioTracks = config.stream.getAudioTracks();
         const hasAudio = audioTracks.length > 0;
         const audioOn = audioTracks.some((track) => track.enabled && track.readyState === "live");
-        const video = tile.querySelector("video");
-        const playbackMuted = Boolean(video && (video.muted || video.volume === 0));
-        const muted = hasAudio && (!audioOn || (!config.local && playbackMuted));
+        const muted = hasAudio && !audioOn;
 
         tile.classList.toggle("audio-muted", muted);
         muteIcon.classList.toggle("hidden", !muted);
