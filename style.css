@@ -356,8 +356,67 @@ button.danger {
     display: none;
 }
 
+.video-tile.expanded .fullscreen-self-view,
+.video-tile:fullscreen .fullscreen-self-view {
+    position: absolute;
+    right: max(12px, env(safe-area-inset-right));
+    top: max(12px, env(safe-area-inset-top));
+    z-index: 18;
+    display: block;
+    width: min(34vw, 150px);
+    aspect-ratio: 3 / 4;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.26);
+    border-radius: 8px;
+    background: #050607;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.44);
+    pointer-events: auto;
+    touch-action: none;
+    user-select: none;
+    cursor: grab;
+}
+
+.video-tile.expanded .fullscreen-self-view.dragging,
+.video-tile:fullscreen .fullscreen-self-view.dragging {
+    cursor: grabbing;
+}
+
+.fullscreen-self-view video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.fullscreen-self-view.mirrored video {
+    transform: scaleX(-1);
+}
+
+.fullscreen-self-view-switch {
+    right: 6px;
+    top: 6px;
+    min-width: 30px;
+    min-height: 28px;
+    padding: 0 8px;
+}
+
+.fullscreen-self-view span {
+    position: absolute;
+    left: 6px;
+    bottom: 6px;
+    max-width: calc(100% - 12px);
+    padding: 3px 6px;
+    border-radius: 6px;
+    background: rgba(6, 8, 10, 0.68);
+    color: #ffffff;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
 .tile-chip,
-.tile-settings-button {
+.tile-settings-button,
+.mute-icon,
+.camera-switch-button,
+.fullscreen-self-view-switch {
     position: absolute;
     z-index: 16;
     border: 1px solid rgba(255, 255, 255, 0.12);
@@ -379,6 +438,26 @@ button.danger {
 .tile-settings-button {
     right: 10px;
     bottom: 10px;
+    min-width: 38px;
+    min-height: 34px;
+    padding: 0 10px;
+}
+
+.mute-icon {
+    left: 10px;
+    top: 10px;
+    min-width: 38px;
+    min-height: 34px;
+    padding: 0 10px;
+}
+
+.mute-icon.hidden {
+    display: none;
+}
+
+.camera-switch-button {
+    right: 10px;
+    top: 10px;
     min-width: 38px;
     min-height: 34px;
     padding: 0 10px;
@@ -771,44 +850,7 @@ button.danger {
 @media (max-width: 720px), (pointer: coarse) {
     .video-tile.expanded .fullscreen-self-view,
     .video-tile:fullscreen .fullscreen-self-view {
-        position: absolute;
-        right: max(12px, env(safe-area-inset-right));
-        top: max(12px, env(safe-area-inset-top));
-        z-index: 18;
-        display: block;
-        width: min(34vw, 150px);
-        aspect-ratio: 3 / 4;
-        overflow: hidden;
-        border: 1px solid rgba(255, 255, 255, 0.26);
-        border-radius: 8px;
-        background: #050607;
-        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.44);
-        pointer-events: none;
-    }
-
-    .video-tile.expanded .fullscreen-self-view video,
-    .video-tile:fullscreen .fullscreen-self-view video {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-    }
-
-    .video-tile.expanded .fullscreen-self-view.mirrored video,
-    .video-tile:fullscreen .fullscreen-self-view.mirrored video {
-        transform: scaleX(-1);
-    }
-
-    .fullscreen-self-view span {
-        position: absolute;
-        left: 6px;
-        bottom: 6px;
-        max-width: calc(100% - 12px);
-        padding: 3px 6px;
-        border-radius: 6px;
-        background: rgba(6, 8, 10, 0.68);
-        color: #ffffff;
-        font-size: 0.72rem;
-        font-weight: 700;
+        width: min(38vw, 160px);
     }
 }
 

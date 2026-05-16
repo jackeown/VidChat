@@ -61,11 +61,14 @@
         layout: "grid",
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
+        cameraFacingMode: localStorage.getItem("vidChatCameraFacingMode") || "",
         cameraRecoveryAttempts: 0,
         cameraRecoveryTimer: null,
         healthTimer: null,
         networkRecoveryTimer: null,
         focusedTileId: null,
+        fullscreenSelfViewPositions: new Map(),
+        fullscreenSelfViewDrag: null,
         zIndex: 1,
         unreadCount: 0,
         chatOpen: false,
@@ -967,7 +970,9 @@
         els.cameraToggle.textContent = "Starting...";
 
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            const stream = await acquireCameraStream(state.cameraFacingMode);
+            state.cameraFacingMode = cameraFacingModeFromStream(stream) || state.cameraFacingMode;
+            localStorage.setItem("vidChatCameraFacingMode", state.cameraFacingMode || "");
             state.cameraRecoveryAttempts = 0;
             state.localStreams.set("camera", stream);
             addCameraTile(stream, false);
@@ -987,6 +992,17 @@
                 }
             }
         }
+    }
+
+    async function acquireCameraStream(facingMode) {
+        const video = facingMode ? { facingMode: { ideal: facingMode } } : true;
+        return navigator.mediaDevices.getUserMedia({ video, audio: true });
+    }
+
+    function cameraFacingModeFromStream(stream) {
+        const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
+        const settings = track && typeof track.getSettings === "function" ? track.getSettings() : null;
+        return settings && settings.facingMode ? settings.facingMode : "";
     }
 
     function startCameraAfterConnection() {
@@ -1044,6 +1060,15 @@
                 setStatus(`Screen share error: ${error.message}`);
             }
         }
+    }
+
+    async function switchLocalCameraFacing() {
+        const stream = state.localStreams.get("camera") || state.previewStreams.get("camera");
+        if (!stream) return;
+
+        const currentFacing = cameraFacingModeFromStream(stream) || state.cameraFacingMode || "user";
+        const nextFacing = currentFacing === "environment" ? "user" : "environment";
+        await restartLocalCameraStream(stream, nextFacing);
     }
 
     function isMobileBrowser() {
@@ -1152,11 +1177,13 @@
         ensureVideoPlayback(video);
     }
 
-    async function restartLocalCameraStream(oldStream) {
+    async function restartLocalCameraStream(oldStream, facingMode) {
         if (state.localStreams.get("camera") !== oldStream) return;
 
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            const stream = await acquireCameraStream(facingMode || cameraFacingModeFromStream(oldStream) || state.cameraFacingMode);
+            state.cameraFacingMode = cameraFacingModeFromStream(stream) || state.cameraFacingMode;
+            localStorage.setItem("vidChatCameraFacingMode", state.cameraFacingMode || "");
             if (state.localStreams.get("camera") !== oldStream) {
                 stream.getTracks().forEach((track) => track.stop());
                 return;
@@ -1740,6 +1767,7 @@
                 }
                 updateRemotePlaybackPrompt(video);
             }
+            updateMuteIndicator(id);
         }
 
         const cameraStream = state.localStreams.get("camera");
@@ -1779,8 +1807,10 @@
         const tile = fragment.querySelector(".video-tile");
         const video = fragment.querySelector("video");
         const title = fragment.querySelector(".tile-title");
+        const muteIcon = fragment.querySelector(".mute-icon");
         const settingsButton = fragment.querySelector(".tile-settings-button");
         const resizeHandle = document.createElement("span");
+        const cameraSwitchButton = document.createElement("button");
         const isRemote = !config.local;
         const hasRemoteAudio = isRemote && config.stream.getAudioTracks().length > 0;
         const muteForAutoplay = hasRemoteAudio;
@@ -1806,7 +1836,6 @@
             queueRemoteAudioUnlock(video, false);
         }
         if (isRemote) bindRemoteAudioTrackEvents(config.stream, video);
-        tile.classList.toggle("audio-muted", config.stream.getAudioTracks().length > 0 && !config.stream.getAudioTracks().some(t => t.enabled));
         resizeHandle.className = "resize-handle";
         resizeHandle.title = "Resize video";
         resizeHandle.setAttribute("aria-hidden", "true");
@@ -1823,6 +1852,21 @@
         tile.addEventListener("pointerdown", () => bringToFront(tile));
         bindTileDragging(tile, tile);
         bindTileResizing(tile, resizeHandle);
+
+        if (config.local && config.kind === "camera" && shouldShowCameraSwitchControl()) {
+            cameraSwitchButton.type = "button";
+            cameraSwitchButton.className = "camera-switch-button";
+            cameraSwitchButton.title = "Switch camera";
+            cameraSwitchButton.setAttribute("aria-label", "Switch camera");
+            cameraSwitchButton.textContent = "↺";
+            cameraSwitchButton.addEventListener("click", (event) => {
+                event.stopPropagation();
+                switchLocalCameraFacing().catch((error) => {
+                    setStatus(`Camera switch error: ${error.message}`);
+                });
+            });
+            tile.appendChild(cameraSwitchButton);
+        }
 
         if (config.preview) {
             const previewOverlay = document.createElement("div");
@@ -1857,6 +1901,7 @@
         state.tileConfigs.set(config.id, config);
         ensureVideoPlayback(video);
         if (muteForAutoplay) unlockRemoteAudio();
+        updateMuteIndicator(config.id);
         updateLocalTileState(config.id);
         updateLocalMediaPrompt(config);
         if (oldFrame && oldFrame.placed) {
@@ -1883,6 +1928,7 @@
         if (!tile || !config || !config.local) return;
 
         tile.classList.toggle("video-muted", !config.stream.getVideoTracks().some((track) => track.enabled));
+        updateMuteIndicator(id);
         updateLocalMediaPrompt(config);
     }
 
@@ -1934,7 +1980,36 @@
             tile.classList.toggle("audio-muted", !audioOn);
         }
 
+        updateMuteIndicator(config.id);
         updateFeedModalSubtitle(config);
+    }
+
+    function updateMuteIndicator(id) {
+        const tile = state.tiles.get(id);
+        const config = state.tileConfigs.get(id);
+        if (!tile || !config) return;
+
+        const muteIcon = tile.querySelector(".mute-icon");
+        if (!muteIcon) return;
+
+        const audioTracks = config.stream.getAudioTracks();
+        const hasAudio = audioTracks.length > 0;
+        const audioOn = audioTracks.some((track) => track.enabled && track.readyState === "live");
+        const video = tile.querySelector("video");
+        const playbackMuted = Boolean(video && (video.muted || video.volume === 0));
+        const muted = hasAudio && (!audioOn || (!config.local && playbackMuted));
+
+        tile.classList.toggle("audio-muted", muted);
+        muteIcon.classList.toggle("hidden", !muted);
+        muteIcon.disabled = true;
+        muteIcon.textContent = "🔇";
+        muteIcon.title = config.local
+            ? (config.kind === "screen" ? "Screen audio muted" : "Microphone muted")
+            : "Remote audio muted";
+    }
+
+    function shouldShowCameraSwitchControl() {
+        return isMobileBrowser() || window.matchMedia("(pointer: coarse)").matches;
     }
 
     function localSubtitle(kind, stream, preview) {
@@ -2257,11 +2332,17 @@
             const label = document.createElement("span");
             label.textContent = "You";
             selfView.append(video, label);
+            if (shouldShowCameraSwitchControl()) {
+                selfView.appendChild(createFullscreenSelfViewCameraSwitchButton());
+            }
             activeTile.appendChild(selfView);
+            bindFullscreenSelfViewDragging(selfView);
         }
 
         if (video.srcObject !== localStream) video.srcObject = localStream;
         selfView.classList.toggle("mirrored", state.mirrorLocalCamera);
+        selfView.dataset.tileId = activeTile.dataset.tileId || "";
+        applyFullscreenSelfViewPosition(selfView, activeTile);
         ensureVideoPlayback(video);
     }
 
@@ -2274,7 +2355,101 @@
 
     function removeSelfView(tile) {
         const selfView = tile && tile.querySelector(".fullscreen-self-view");
-        if (selfView) selfView.remove();
+        if (!selfView) return;
+        if (state.fullscreenSelfViewDrag && state.fullscreenSelfViewDrag.selfView === selfView) {
+            state.fullscreenSelfViewDrag = null;
+        }
+        selfView.remove();
+    }
+
+    function createFullscreenSelfViewCameraSwitchButton() {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "fullscreen-self-view-switch";
+        button.title = "Switch camera";
+        button.setAttribute("aria-label", "Switch camera");
+        button.textContent = "↺";
+        button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            switchLocalCameraFacing().catch((error) => {
+                setStatus(`Camera switch error: ${error.message}`);
+            });
+        });
+        return button;
+    }
+
+    function bindFullscreenSelfViewDragging(selfView) {
+        if (selfView.dataset.dragBound === "true") return;
+        selfView.dataset.dragBound = "true";
+        selfView.addEventListener("pointerdown", (event) => {
+            if (isInteractiveControl(event.target)) return;
+            startFullscreenSelfViewDrag(event, selfView);
+        });
+    }
+
+    function startFullscreenSelfViewDrag(event, selfView) {
+        const tile = selfView.closest(".video-tile");
+        if (!tile) return;
+
+        event.preventDefault();
+        selfView.setPointerCapture(event.pointerId);
+
+        const parentRect = tile.getBoundingClientRect();
+        const viewRect = selfView.getBoundingClientRect();
+        const start = {
+            pointerX: event.clientX,
+            pointerY: event.clientY,
+            left: viewRect.left - parentRect.left,
+            top: viewRect.top - parentRect.top,
+            width: viewRect.width,
+            height: viewRect.height
+        };
+
+        state.fullscreenSelfViewDrag = { selfView, tile };
+        selfView.classList.add("dragging");
+
+        const move = (moveEvent) => {
+            const nextLeft = clamp(start.left + (moveEvent.clientX - start.pointerX), 8, Math.max(8, parentRect.width - start.width - 8));
+            const nextTop = clamp(start.top + (moveEvent.clientY - start.pointerY), 8, Math.max(8, parentRect.height - start.height - 8));
+            selfView.style.left = `${nextLeft}px`;
+            selfView.style.top = `${nextTop}px`;
+            selfView.style.right = "auto";
+            selfView.style.bottom = "auto";
+            state.fullscreenSelfViewPositions.set(tile.dataset.tileId || "", {
+                left: nextLeft,
+                top: nextTop
+            });
+        };
+
+        const stop = () => {
+            selfView.classList.remove("dragging");
+            selfView.removeEventListener("pointermove", move);
+            selfView.removeEventListener("pointerup", stop);
+            selfView.removeEventListener("pointercancel", stop);
+            state.fullscreenSelfViewDrag = null;
+        };
+
+        selfView.addEventListener("pointermove", move);
+        selfView.addEventListener("pointerup", stop);
+        selfView.addEventListener("pointercancel", stop);
+    }
+
+    function applyFullscreenSelfViewPosition(selfView, activeTile) {
+        const tileId = activeTile.dataset.tileId || "";
+        const saved = state.fullscreenSelfViewPositions.get(tileId);
+        if (saved) {
+            selfView.style.left = `${saved.left}px`;
+            selfView.style.top = `${saved.top}px`;
+            selfView.style.right = "auto";
+            selfView.style.bottom = "auto";
+            return;
+        }
+
+        selfView.style.left = "";
+        selfView.style.top = "";
+        selfView.style.right = "";
+        selfView.style.bottom = "";
     }
 
     function applyFocus() {
