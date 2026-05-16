@@ -39,6 +39,11 @@
         dataRetryTimers: new Map(),
         dataRetryAttempts: new Map(),
         dataConnections: new Map(),
+        dataLastSeen: new Map(),
+        knownPeers: new Set(),
+        expectedRemoteStreams: new Map(),
+        missingStreamRequests: new Map(),
+        lastStreamManifestAt: 0,
         peerNames: new Map(),
         tiles: new Map(),
         tileConfigs: new Map(),
@@ -244,7 +249,10 @@
         state.dataConnections.set(conn.peer, conn);
         conn.on("open", () => {
             clearDataConnectionRetry(conn.peer);
+            markPeerSeen(conn.peer);
+            rememberPeer(conn.peer);
             conn.send({ type: "hello", peerId: state.peer.id, displayName: state.displayName });
+            sendStreamManifestTo(conn.peer);
 
             if (state.isHost && coordinatorConnection) {
                 const roster = roomRoster(conn.peer);
@@ -253,13 +261,19 @@
             }
 
             sendLocalStreamsTo(conn.peer);
+            publishLocalStreamManifest(true);
             updatePeerStatus();
         });
 
-        conn.on("data", (message) => handleMessage(conn.peer, message));
+        conn.on("data", (message) => {
+            markPeerSeen(conn.peer);
+            handleMessage(conn.peer, message);
+        });
         conn.on("close", () => {
             if (state.dataConnections.get(conn.peer) !== conn) return;
             state.dataConnections.delete(conn.peer);
+            state.dataLastSeen.delete(conn.peer);
+            clearMissingStreamRequestsForPeer(conn.peer);
             closeCallsForPeer(conn.peer);
             failIncomingFilesForPeer(conn.peer, "Transfer interrupted.");
             failOutgoingFilesForPeer(conn.peer, "Peer disconnected during transfer.");
@@ -273,6 +287,8 @@
         conn.on("error", () => {
             if (state.dataConnections.get(conn.peer) !== conn) return;
             state.dataConnections.delete(conn.peer);
+            state.dataLastSeen.delete(conn.peer);
+            clearMissingStreamRequestsForPeer(conn.peer);
             failIncomingFilesForPeer(conn.peer, "Transfer failed.");
             failOutgoingFilesForPeer(conn.peer, "Peer connection failed during transfer.");
             if (conn.peer === roomPeerId) {
@@ -293,9 +309,31 @@
             return;
         }
 
+        if (message.type === "health-ping") {
+            sendToPeer(peerId, { type: "health-pong", timestamp: Date.now() });
+            return;
+        }
+
+        if (message.type === "health-pong") {
+            return;
+        }
+
+        if (message.type === "stream-manifest") {
+            handleStreamManifest(peerId, message);
+            return;
+        }
+
+        if (message.type === "request-stream") {
+            resendLocalStreamToPeer(peerId, message.kind);
+            return;
+        }
+
         if (message.type === "welcome") {
             setStatus(`Joined room ${message.roomId}. Connecting to ${message.peers.length} peer(s).`);
-            message.peers.forEach((id) => connectData(id, false));
+            message.peers.forEach((id) => {
+                rememberPeer(id);
+                connectData(id, false);
+            });
             if (message.history) {
                 message.history.forEach((msg) => {
                     if (msg.type === "chat") {
@@ -315,12 +353,14 @@
         }
 
         if (message.type === "peer-joined") {
+            rememberPeer(message.peerId);
             connectData(message.peerId, false);
             updatePeerStatus();
             return;
         }
 
         if (message.type === "peer-left") {
+            forgetPeer(message.peerId);
             clearDataConnectionRetry(message.peerId);
             removePeerTiles(message.peerId);
             updatePeerStatus();
@@ -328,6 +368,7 @@
         }
 
         if (message.type === "stream-stopped") {
+            forgetExpectedRemoteStream(peerId, message.kind);
             removeTile(tileId(peerId, message.kind));
             return;
         }
@@ -918,6 +959,7 @@
             state.localStreams.set("camera", stream);
             addCameraTile(stream, false);
             sendLocalStreamToAll("camera", stream);
+            publishLocalStreamManifest(true);
             setStatus("Camera and microphone are now shared.");
         } catch (error) {
             setStatus(`Camera error: ${error.message}`);
@@ -981,6 +1023,7 @@
         });
 
         sendLocalStreamToAll(kind, stream);
+        publishLocalStreamManifest(true);
         updateMediaButtons();
     }
 
@@ -1059,6 +1102,7 @@
             closeOutboundCalls("camera");
             addCameraTile(stream, false);
             sendLocalStreamToAll("camera", stream);
+            publishLocalStreamManifest(true);
             updateMediaButtons();
         } catch (error) {
             setStatus(`Camera recovery error: ${error.message}`);
@@ -1097,6 +1141,7 @@
         closeOutboundCalls(kind);
 
         broadcast({ type: "stream-stopped", kind });
+        publishLocalStreamManifest(true);
         updateMediaButtons();
     }
 
@@ -1174,11 +1219,30 @@
         state.callRetryTimers.delete(key);
     }
 
+    function rememberPeer(peerId) {
+        if (!peerId || peerId === roomPeerId || peerId === (state.peer && state.peer.id)) return;
+        state.knownPeers.add(peerId);
+    }
+
+    function forgetPeer(peerId) {
+        if (!peerId || peerId === roomPeerId) return;
+        state.knownPeers.delete(peerId);
+    }
+
+    function markPeerSeen(peerId) {
+        if (!peerId) return;
+        state.dataLastSeen.set(peerId, Date.now());
+    }
+
     function startHealthLoop() {
         if (state.healthTimer) return;
         state.healthTimer = window.setInterval(runHealthCheck, 1000);
         window.addEventListener("online", scheduleNetworkRecovery);
         window.addEventListener("offline", () => setStatus("Network offline. Waiting to reconnect..."));
+        window.addEventListener("focus", scheduleNetworkRecovery);
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) scheduleNetworkRecovery();
+        });
         if (navigator.connection && typeof navigator.connection.addEventListener === "function") {
             navigator.connection.addEventListener("change", scheduleNetworkRecovery);
         }
@@ -1187,6 +1251,9 @@
     function runHealthCheck() {
         recoverPeerConnection();
         ensureRoomCoordinatorReachable();
+        sendHealthPings();
+        publishLocalStreamManifest();
+        requestMissingExpectedStreams();
         repairDeadConnections();
         ensureLocalStreamsAreShared();
         refreshMediaElements();
@@ -1203,16 +1270,20 @@
     function runNetworkRecovery() {
         setStatus("Network changed. Rechecking room connections...");
         recoverPeerConnection();
-        for (const [peerId, conn] of [...state.dataConnections]) {
-            if (!conn.open || isPeerConnectionInterrupted(findPeerConnection(conn))) {
-                state.dataConnections.delete(peerId);
-                conn.close();
-                closeCallsForPeer(peerId);
-                connectData(peerId, peerId === roomPeerId);
-            }
-        }
+        recoverCoordinatorPeer();
+        rebuildPeerConnections();
         ensureRoomCoordinatorReachable();
-        ensureLocalStreamsAreShared(true);
+        reconnectKnownPeers();
+        window.setTimeout(() => {
+            ensureRoomCoordinatorReachable();
+            reconnectKnownPeers();
+            ensureLocalStreamsAreShared(true);
+        }, 1800);
+        window.setTimeout(() => {
+            ensureRoomCoordinatorReachable();
+            reconnectKnownPeers();
+            ensureLocalStreamsAreShared(true);
+        }, 4500);
         updatePeerStatus();
     }
 
@@ -1227,6 +1298,165 @@
         }
     }
 
+    function recoverCoordinatorPeer() {
+        if (!state.coordinatorPeer || state.coordinatorPeer.destroyed) return;
+        if (state.coordinatorPeer.disconnected && typeof state.coordinatorPeer.reconnect === "function") {
+            try {
+                state.coordinatorPeer.reconnect();
+            } catch (error) {
+                state.coordinatorPeer.destroy();
+                state.coordinatorPeer = null;
+                state.isHost = false;
+                scheduleCoordinatorClaim(randomCoordinatorDelay());
+            }
+        }
+    }
+
+    function sendHealthPings() {
+        const now = Date.now();
+        for (const [peerId, conn] of state.dataConnections) {
+            if (!conn.open) continue;
+            try {
+                conn.send({ type: "health-ping", timestamp: now });
+            } catch (error) {
+                state.dataLastSeen.set(peerId, 0);
+            }
+        }
+    }
+
+    function publishLocalStreamManifest(force = false) {
+        const now = Date.now();
+        if (!force && now - state.lastStreamManifestAt < 2000) return;
+        state.lastStreamManifestAt = now;
+
+        const streams = localStreamManifest();
+        for (const [peerId, conn] of state.dataConnections) {
+            if (!conn.open) continue;
+            conn.send({ type: "stream-manifest", streams, timestamp: now });
+        }
+    }
+
+    function sendStreamManifestTo(peerId) {
+        sendToPeer(peerId, { type: "stream-manifest", streams: localStreamManifest(), timestamp: Date.now() });
+    }
+
+    function localStreamManifest() {
+        return [...state.localStreams]
+            .filter(([, stream]) => stream.getTracks().some((track) => track.readyState === "live"))
+            .map(([kind, stream]) => ({
+                kind,
+                hasVideo: stream.getVideoTracks().some((track) => track.readyState === "live"),
+                hasAudio: stream.getAudioTracks().some((track) => track.readyState === "live")
+            }));
+    }
+
+    function handleStreamManifest(peerId, message) {
+        if (!Array.isArray(message.streams)) return;
+        const expected = new Set();
+        for (const streamInfo of message.streams) {
+            if (!streamInfo || !streamInfo.kind) continue;
+            expected.add(streamInfo.kind);
+            if (!hasHealthyRemoteStream(peerId, streamInfo.kind)) {
+                requestRemoteStream(peerId, streamInfo.kind, "missing-or-stale");
+            }
+        }
+        state.expectedRemoteStreams.set(peerId, expected);
+    }
+
+    function requestMissingExpectedStreams() {
+        for (const [peerId, kinds] of state.expectedRemoteStreams) {
+            const conn = state.dataConnections.get(peerId);
+            if (!conn || !conn.open) continue;
+            for (const kind of kinds) {
+                if (!hasHealthyRemoteStream(peerId, kind)) {
+                    requestRemoteStream(peerId, kind, "health-check");
+                }
+            }
+        }
+    }
+
+    function requestRemoteStream(peerId, kind, reason) {
+        const key = `${peerId}:${kind}`;
+        const now = Date.now();
+        if (now - (state.missingStreamRequests.get(key) || 0) < 3000) return;
+        state.missingStreamRequests.set(key, now);
+        sendToPeer(peerId, { type: "request-stream", kind, reason });
+    }
+
+    function hasHealthyRemoteStream(peerId, kind) {
+        const config = state.tileConfigs.get(tileId(peerId, kind));
+        if (!config || !config.stream) return false;
+        const tracks = config.stream.getTracks();
+        if (!tracks.some((track) => track.readyState === "live")) return false;
+        const videoTracks = config.stream.getVideoTracks();
+        if (!videoTracks.length) return true;
+        const tile = state.tiles.get(tileId(peerId, kind));
+        const video = tile && tile.querySelector("video");
+        return Boolean(video && isVideoElementRendering(video));
+    }
+
+    function forgetExpectedRemoteStream(peerId, kind) {
+        const expected = state.expectedRemoteStreams.get(peerId);
+        if (!expected) return;
+        expected.delete(kind);
+        state.missingStreamRequests.delete(`${peerId}:${kind}`);
+        if (!expected.size) state.expectedRemoteStreams.delete(peerId);
+    }
+
+    function clearMissingStreamRequestsForPeer(peerId) {
+        for (const key of [...state.missingStreamRequests.keys()]) {
+            if (key.startsWith(`${peerId}:`)) state.missingStreamRequests.delete(key);
+        }
+    }
+
+    function resendLocalStreamToPeer(peerId, kind) {
+        const stream = state.localStreams.get(kind);
+        const conn = state.dataConnections.get(peerId);
+        if (!stream || !conn || !conn.open) return;
+        const key = `${kind}:${peerId}`;
+        const oldCall = state.outboundCalls.get(key);
+        if (oldCall) {
+            clearMediaCallRetry(key);
+            oldCall.close();
+            state.outboundCalls.delete(key);
+        }
+        callPeer(peerId, kind, stream);
+    }
+
+    function rebuildPeerConnections() {
+        for (const peerId of state.dataConnections.keys()) {
+            rememberPeer(peerId);
+        }
+
+        for (const [key, call] of [...state.outboundCalls]) {
+            clearMediaCallRetry(key);
+            call.close();
+            state.outboundCalls.delete(key);
+        }
+
+        for (const [key, call] of [...state.inboundCalls]) {
+            call.close();
+            state.inboundCalls.delete(key);
+            const [kind, peerId] = splitCallKey(key);
+            removeTile(tileId(peerId, kind));
+        }
+
+        for (const [peerId, conn] of [...state.dataConnections]) {
+            conn.close();
+            state.dataConnections.delete(peerId);
+            state.dataLastSeen.delete(peerId);
+            state.expectedRemoteStreams.delete(peerId);
+            clearMissingStreamRequestsForPeer(peerId);
+            if (peerId !== roomPeerId) removePeerTiles(peerId);
+        }
+    }
+
+    function reconnectKnownPeers() {
+        for (const peerId of state.knownPeers) {
+            connectData(peerId, false);
+        }
+    }
+
     function ensureRoomCoordinatorReachable() {
         if (!state.peer) return;
         if (state.isHost || state.coordinatorPeer) return;
@@ -1235,11 +1465,22 @@
     }
 
     function repairDeadConnections() {
+        const now = Date.now();
         for (const [peerId, conn] of [...state.dataConnections]) {
-            if (conn.open) continue;
+            const staleHeartbeat = now - (state.dataLastSeen.get(peerId) || 0) > 9000;
+            if (conn.open && !staleHeartbeat && !isPeerConnectionInterrupted(findPeerConnection(conn))) continue;
+            rememberPeer(peerId);
             state.dataConnections.delete(peerId);
+            state.dataLastSeen.delete(peerId);
+            state.expectedRemoteStreams.delete(peerId);
+            clearMissingStreamRequestsForPeer(peerId);
+            conn.close();
             closeCallsForPeer(peerId);
-            if (peerId === roomPeerId) scheduleCoordinatorClaim(randomCoordinatorDelay());
+            if (peerId === roomPeerId) {
+                scheduleCoordinatorClaim(randomCoordinatorDelay());
+            } else {
+                connectData(peerId, false);
+            }
         }
 
         for (const [key, call] of [...state.outboundCalls]) {
@@ -2161,7 +2402,7 @@
     }
 
     function roomRoster(exceptPeerId) {
-        const peers = new Set(state.dataConnections.keys());
+        const peers = new Set([...state.knownPeers, ...state.dataConnections.keys()]);
         peers.delete(exceptPeerId);
         peers.delete(roomPeerId);
         peers.delete(state.peer && state.peer.id);
