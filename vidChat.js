@@ -541,7 +541,16 @@
         } catch (error) {
             setStatus(`Camera error: ${error.message}`);
         } finally {
-            updateMediaButtons();
+            // Ensure the camera toggle is re-enabled even if updateMediaButtons throws
+            try {
+                updateMediaButtons();
+            } catch (err) {
+                console.error('updateMediaButtons failed', err);
+                if (els && els.cameraToggle) {
+                    els.cameraToggle.disabled = false;
+                    els.cameraToggle.textContent = (state.localStreams.has("camera") || state.previewStreams.has("camera")) ? "Remove Video" : "Share Camera/Mic";
+                }
+            }
         }
     }
 
