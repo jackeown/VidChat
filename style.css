@@ -384,6 +384,55 @@ button.danger {
     padding: 0 10px;
 }
 
+.mute-icon {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 16;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    background: rgba(6, 8, 10, 0.62);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
+}
+
+.mute-icon.hidden {
+    display: none;
+}
+
+.camera-switch-button {
+    position: absolute;
+    top: 10px;
+    right: 50px;
+    z-index: 16;
+    min-width: 36px;
+    min-height: 32px;
+    padding: 0 8px;
+    font-size: 0.8rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    background: rgba(6, 8, 10, 0.62);
+    backdrop-filter: blur(10px);
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color 160ms ease, background 160ms ease;
+}
+
+.camera-switch-button:hover {
+    border-color: rgba(255, 255, 255, 0.3);
+    background: rgba(6, 8, 10, 0.82);
+}
+
+.camera-switch-button.hidden {
+    display: none;
+}
+
 .preview-overlay {
     position: absolute;
     inset: 0;
@@ -1003,4 +1052,45 @@ button.danger {
 .route-badge.direct {
     border-color: #56d364;
     color: #56d364;
+}
+
+.connection-detail-grid {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: auto 1fr;
+}
+
+.connection-detail-grid dt {
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.connection-detail-grid dd {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.82rem;
+    word-break: break-word;
+}
+
+.connection-empty {
+    margin: 20px 0;
+    color: var(--muted);
+    text-align: center;
+    font-size: 0.9rem;
+}
+
+@media (max-width: 600px) {
+    .mute-icon {
+        width: 28px;
+        height: 28px;
+        font-size: 1rem;
+    }
+
+    .camera-switch-button {
+        min-width: 32px;
+        min-height: 28px;
+        font-size: 0.7rem;
+        padding: 0 6px;
+    }
 }
