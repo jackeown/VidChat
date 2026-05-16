@@ -42,6 +42,7 @@
         dataLastSeen: new Map(),
         knownPeers: new Set(),
         expectedRemoteStreams: new Map(),
+        expectedRemoteStreamSince: new Map(),
         missingStreamRequests: new Map(),
         lastStreamManifestAt: 0,
         peerNames: new Map(),
@@ -1239,9 +1240,9 @@
         state.healthTimer = window.setInterval(runHealthCheck, 1000);
         window.addEventListener("online", scheduleNetworkRecovery);
         window.addEventListener("offline", () => setStatus("Network offline. Waiting to reconnect..."));
-        window.addEventListener("focus", scheduleNetworkRecovery);
+        window.addEventListener("focus", runHealthCheck);
         document.addEventListener("visibilitychange", () => {
-            if (!document.hidden) scheduleNetworkRecovery();
+            if (!document.hidden) runHealthCheck();
         });
         if (navigator.connection && typeof navigator.connection.addEventListener === "function") {
             navigator.connection.addEventListener("change", scheduleNetworkRecovery);
@@ -1271,18 +1272,21 @@
         setStatus("Network changed. Rechecking room connections...");
         recoverPeerConnection();
         recoverCoordinatorPeer();
-        rebuildPeerConnections();
         ensureRoomCoordinatorReachable();
         reconnectKnownPeers();
+        repairDeadConnections();
+        ensureLocalStreamsAreShared(true);
         window.setTimeout(() => {
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
+            repairDeadConnections();
         }, 1800);
         window.setTimeout(() => {
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
+            repairDeadConnections();
         }, 4500);
         updatePeerStatus();
     }
@@ -1356,11 +1360,10 @@
         for (const streamInfo of message.streams) {
             if (!streamInfo || !streamInfo.kind) continue;
             expected.add(streamInfo.kind);
-            if (!hasHealthyRemoteStream(peerId, streamInfo.kind)) {
-                requestRemoteStream(peerId, streamInfo.kind, "missing-or-stale");
-            }
+            trackExpectedRemoteStream(peerId, streamInfo.kind);
         }
         state.expectedRemoteStreams.set(peerId, expected);
+        clearUnexpectedRemoteStreamExpectations(peerId, expected);
     }
 
     function requestMissingExpectedStreams() {
@@ -1368,7 +1371,9 @@
             const conn = state.dataConnections.get(peerId);
             if (!conn || !conn.open) continue;
             for (const kind of kinds) {
-                if (!hasHealthyRemoteStream(peerId, kind)) {
+                const expectedKey = expectedRemoteStreamKey(peerId, kind);
+                const missingLongEnough = Date.now() - (state.expectedRemoteStreamSince.get(expectedKey) || Date.now()) > 5000;
+                if (missingLongEnough && !hasHealthyRemoteStream(peerId, kind)) {
                     requestRemoteStream(peerId, kind, "health-check");
                 }
             }
@@ -1378,7 +1383,7 @@
     function requestRemoteStream(peerId, kind, reason) {
         const key = `${peerId}:${kind}`;
         const now = Date.now();
-        if (now - (state.missingStreamRequests.get(key) || 0) < 3000) return;
+        if (now - (state.missingStreamRequests.get(key) || 0) < 10000) return;
         state.missingStreamRequests.set(key, now);
         sendToPeer(peerId, { type: "request-stream", kind, reason });
     }
@@ -1389,10 +1394,36 @@
         const tracks = config.stream.getTracks();
         if (!tracks.some((track) => track.readyState === "live")) return false;
         const videoTracks = config.stream.getVideoTracks();
-        if (!videoTracks.length) return true;
-        const tile = state.tiles.get(tileId(peerId, kind));
-        const video = tile && tile.querySelector("video");
-        return Boolean(video && isVideoElementRendering(video));
+        return !videoTracks.length || videoTracks.some((track) => track.readyState === "live");
+    }
+
+    function trackExpectedRemoteStream(peerId, kind) {
+        const key = expectedRemoteStreamKey(peerId, kind);
+        if (hasHealthyRemoteStream(peerId, kind)) {
+            state.expectedRemoteStreamSince.delete(key);
+            state.missingStreamRequests.delete(key);
+            return;
+        }
+        if (!state.expectedRemoteStreamSince.has(key)) state.expectedRemoteStreamSince.set(key, Date.now());
+    }
+
+    function clearUnexpectedRemoteStreamExpectations(peerId, expected) {
+        for (const key of [...state.expectedRemoteStreamSince.keys()]) {
+            const [keyPeerId, kind] = splitExpectedRemoteStreamKey(key);
+            if (keyPeerId === peerId && !expected.has(kind)) {
+                state.expectedRemoteStreamSince.delete(key);
+                state.missingStreamRequests.delete(key);
+            }
+        }
+    }
+
+    function expectedRemoteStreamKey(peerId, kind) {
+        return `${peerId}:${kind}`;
+    }
+
+    function splitExpectedRemoteStreamKey(key) {
+        const separator = key.lastIndexOf(":");
+        return [key.slice(0, separator), key.slice(separator + 1)];
     }
 
     function forgetExpectedRemoteStream(peerId, kind) {
@@ -1400,12 +1431,16 @@
         if (!expected) return;
         expected.delete(kind);
         state.missingStreamRequests.delete(`${peerId}:${kind}`);
+        state.expectedRemoteStreamSince.delete(expectedRemoteStreamKey(peerId, kind));
         if (!expected.size) state.expectedRemoteStreams.delete(peerId);
     }
 
     function clearMissingStreamRequestsForPeer(peerId) {
         for (const key of [...state.missingStreamRequests.keys()]) {
             if (key.startsWith(`${peerId}:`)) state.missingStreamRequests.delete(key);
+        }
+        for (const key of [...state.expectedRemoteStreamSince.keys()]) {
+            if (key.startsWith(`${peerId}:`)) state.expectedRemoteStreamSince.delete(key);
         }
     }
 
