@@ -402,7 +402,8 @@ button.danger {
     pointer-events: auto;
 }
 
-.remote-playback-overlay {
+.remote-playback-overlay,
+.local-media-overlay {
     position: absolute;
     inset: 0;
     z-index: 14;
@@ -415,6 +416,10 @@ button.danger {
     font-weight: 800;
     text-align: center;
     cursor: pointer;
+}
+
+.local-media-overlay {
+    background: rgba(5, 6, 7, 0.66);
 }
 
 .remote-playback-overlay.audio-only {

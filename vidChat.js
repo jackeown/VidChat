@@ -7,13 +7,19 @@
         "amber", "brave", "bright", "calm", "clever", "cosmic", "crisp", "daring",
         "electric", "frosty", "gentle", "golden", "hidden", "lucky", "lunar", "magic",
         "merry", "neon", "nimble", "polar", "quiet", "rapid", "silver", "solar",
-        "steady", "swift", "vivid", "wild"
+        "steady", "swift", "vivid", "wild", "ancient", "bold", "breezy", "brisk",
+        "cobalt", "curious", "dreamy", "emerald", "fearless", "glowing", "happy", "ivory",
+        "jolly", "kind", "misty", "nova", "opal", "playful", "proud", "ruby",
+        "sapphire", "shimmering", "tidy", "zesty"
     ];
     const roomNouns = [
         "atlas", "beacon", "bridge", "canyon", "comet", "cove", "ember", "forest",
         "harbor", "lantern", "meadow", "meteor", "orbit", "pixel", "prairie", "quartz",
         "river", "rocket", "summit", "tempo", "tower", "valley", "voyage", "wave",
-        "window", "zephyr"
+        "window", "zephyr", "anchor", "arcade", "aurora", "breeze", "citadel", "cloud",
+        "compass", "delta", "echo", "galaxy", "garden", "glacier", "horizon", "island",
+        "jewel", "lagoon", "matrix", "nebula", "oasis", "portal", "reef", "signal",
+        "spark", "studio"
     ];
 
     const qs = new URLSearchParams(window.location.search);
@@ -46,6 +52,8 @@
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
         cameraRecoveryAttempts: 0,
         cameraRecoveryTimer: null,
+        healthTimer: null,
+        networkRecoveryTimer: null,
         focusedTileId: null,
         zIndex: 1,
         unreadCount: 0,
@@ -130,6 +138,7 @@
     applyTheme();
     applyChatName();
     bindUi();
+    startHealthLoop();
     window.addEventListener("resize", keepTilesInsideStage);
     startRoom();
 
@@ -848,7 +857,13 @@
     }
 
     function connectData(peerId, required) {
-        if (!peerId || peerId === state.peer.id || state.dataConnections.has(peerId)) return;
+        if (!peerId || peerId === state.peer.id) return;
+        const existing = state.dataConnections.get(peerId);
+        if (existing && existing.open) return;
+        if (existing) {
+            existing.close();
+            state.dataConnections.delete(peerId);
+        }
 
         const conn = state.peer.connect(peerId, { reliable: true });
         registerConnection(conn);
@@ -1005,7 +1020,7 @@
         ensureVideoPlayback(video);
 
         const hasLiveVideo = stream.getVideoTracks().some((track) => track.enabled && track.readyState === "live");
-        const isRendering = video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0 && !video.paused;
+        const isRendering = isVideoElementRendering(video);
         if (!hasLiveVideo || isRendering) return;
 
         if (state.cameraRecoveryAttempts === 0) {
@@ -1053,6 +1068,22 @@
     function localCameraVideo() {
         const tile = state.tiles.get(tileId("local", "camera"));
         return tile ? tile.querySelector("video") : null;
+    }
+
+    function createLocalMediaOverlay(config) {
+        const overlay = document.createElement("button");
+        overlay.type = "button";
+        overlay.className = "local-media-overlay hidden";
+        overlay.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (config.kind === "camera") {
+                restartLocalCameraStream(config.stream);
+                return;
+            }
+            if (config.kind === "screen") toggleScreen();
+        });
+        return overlay;
     }
 
     function stopLocalStream(kind) {
@@ -1143,6 +1174,139 @@
         state.callRetryTimers.delete(key);
     }
 
+    function startHealthLoop() {
+        if (state.healthTimer) return;
+        state.healthTimer = window.setInterval(runHealthCheck, 1000);
+        window.addEventListener("online", scheduleNetworkRecovery);
+        window.addEventListener("offline", () => setStatus("Network offline. Waiting to reconnect..."));
+        if (navigator.connection && typeof navigator.connection.addEventListener === "function") {
+            navigator.connection.addEventListener("change", scheduleNetworkRecovery);
+        }
+    }
+
+    function runHealthCheck() {
+        recoverPeerConnection();
+        ensureRoomCoordinatorReachable();
+        repairDeadConnections();
+        ensureLocalStreamsAreShared();
+        refreshMediaElements();
+    }
+
+    function scheduleNetworkRecovery() {
+        if (state.networkRecoveryTimer) window.clearTimeout(state.networkRecoveryTimer);
+        state.networkRecoveryTimer = window.setTimeout(() => {
+            state.networkRecoveryTimer = null;
+            runNetworkRecovery();
+        }, 350);
+    }
+
+    function runNetworkRecovery() {
+        setStatus("Network changed. Rechecking room connections...");
+        recoverPeerConnection();
+        for (const [peerId, conn] of [...state.dataConnections]) {
+            if (!conn.open || isPeerConnectionInterrupted(findPeerConnection(conn))) {
+                state.dataConnections.delete(peerId);
+                conn.close();
+                closeCallsForPeer(peerId);
+                connectData(peerId, peerId === roomPeerId);
+            }
+        }
+        ensureRoomCoordinatorReachable();
+        ensureLocalStreamsAreShared(true);
+        updatePeerStatus();
+    }
+
+    function recoverPeerConnection() {
+        if (!state.peer || state.peer.destroyed) return;
+        if (state.peer.disconnected && typeof state.peer.reconnect === "function") {
+            try {
+                state.peer.reconnect();
+            } catch (error) {
+                setStatus(`Reconnect error: ${error.message}`);
+            }
+        }
+    }
+
+    function ensureRoomCoordinatorReachable() {
+        if (!state.peer) return;
+        if (state.isHost || state.coordinatorPeer) return;
+        const roomConn = state.dataConnections.get(roomPeerId);
+        if (!roomConn || !roomConn.open) connectData(roomPeerId, true);
+    }
+
+    function repairDeadConnections() {
+        for (const [peerId, conn] of [...state.dataConnections]) {
+            if (conn.open) continue;
+            state.dataConnections.delete(peerId);
+            closeCallsForPeer(peerId);
+            if (peerId === roomPeerId) scheduleCoordinatorClaim(randomCoordinatorDelay());
+        }
+
+        for (const [key, call] of [...state.outboundCalls]) {
+            if (!isPeerConnectionDead(findPeerConnection(call))) continue;
+            state.outboundCalls.delete(key);
+            call.close();
+            const [kind, peerId] = splitCallKey(key);
+            const stream = state.localStreams.get(kind);
+            if (stream && state.dataConnections.has(peerId)) callPeer(peerId, kind, stream);
+        }
+
+        for (const [key, call] of [...state.inboundCalls]) {
+            if (!isPeerConnectionDead(findPeerConnection(call))) continue;
+            clearIncomingCall(key, call);
+            call.close();
+        }
+    }
+
+    function isPeerConnectionDead(pc) {
+        if (!pc) return false;
+        const stateValue = pc.connectionState || pc.iceConnectionState;
+        return stateValue === "failed" || stateValue === "closed";
+    }
+
+    function isPeerConnectionInterrupted(pc) {
+        if (!pc) return false;
+        const stateValue = pc.connectionState || pc.iceConnectionState;
+        return stateValue === "failed" || stateValue === "closed" || stateValue === "disconnected";
+    }
+
+    function ensureLocalStreamsAreShared(force = false) {
+        for (const [kind, stream] of state.localStreams) {
+            const hasLiveTrack = stream.getTracks().some((track) => track.enabled && track.readyState === "live");
+            if (!hasLiveTrack) continue;
+
+            for (const [peerId, conn] of state.dataConnections) {
+                if (!conn.open || peerId === state.peer.id) continue;
+                const key = `${kind}:${peerId}`;
+                if (force || !state.outboundCalls.has(key)) callPeer(peerId, kind, stream);
+            }
+        }
+    }
+
+    function refreshMediaElements() {
+        for (const [id, config] of state.tileConfigs) {
+            const tile = state.tiles.get(id);
+            const video = tile && tile.querySelector("video");
+            if (!tile || !video) continue;
+
+            if (video.srcObject !== config.stream) video.srcObject = config.stream;
+            ensureVideoPlayback(video);
+
+            if (config.local) {
+                updateLocalMediaPrompt(config);
+            } else {
+                if (config.stream.getAudioTracks().some((track) => track.enabled && track.readyState === "live") && video.muted && video.volume > 0) {
+                    queueRemoteAudioUnlock(video);
+                    unlockRemoteAudio();
+                }
+                updateRemotePlaybackPrompt(video);
+            }
+        }
+
+        const cameraStream = state.localStreams.get("camera");
+        if (cameraStream && !state.cameraRecoveryTimer) scheduleLocalCameraRenderCheck(cameraStream, 0);
+    }
+
     function addRemoteStream(peerId, metadata, stream) {
         const kind = metadata && metadata.kind ? metadata.kind : "camera";
         if (metadata && metadata.displayName) {
@@ -1183,6 +1347,7 @@
         const muteForAutoplay = hasRemoteAudio;
 
         tile.dataset.tileId = config.id;
+        config.createdAt = Date.now();
         tile.classList.add(config.kind);
         tile.classList.toggle("preview", Boolean(config.preview));
         tile.classList.toggle("local-camera", config.local && config.kind === "camera");
@@ -1239,6 +1404,10 @@
             tile.appendChild(previewOverlay);
         }
 
+        if (config.local) {
+            tile.appendChild(createLocalMediaOverlay(config));
+        }
+
         if (isRemote) {
             tile.appendChild(createRemotePlaybackOverlay(video));
         }
@@ -1250,6 +1419,7 @@
         ensureVideoPlayback(video);
         if (muteForAutoplay) unlockRemoteAudio();
         updateLocalTileState(config.id);
+        updateLocalMediaPrompt(config);
         if (oldFrame && oldFrame.placed) {
             setTileFrame(tile, oldFrame.x, oldFrame.y, oldFrame.width, oldFrame.height);
         } else {
@@ -1274,6 +1444,34 @@
         if (!tile || !config || !config.local) return;
 
         tile.classList.toggle("video-muted", !config.stream.getVideoTracks().some((track) => track.enabled));
+        updateLocalMediaPrompt(config);
+    }
+
+    function updateLocalMediaPrompt(config) {
+        if (!config || !config.local) return;
+        const tile = state.tiles.get(config.id);
+        const overlay = tile && tile.querySelector(".local-media-overlay");
+        if (!tile || !overlay) return;
+
+        const videoTracks = config.stream.getVideoTracks();
+        const liveVideo = videoTracks.some((track) => track.enabled && track.readyState === "live");
+        const endedVideo = videoTracks.length > 0 && !videoTracks.some((track) => track.readyState === "live");
+        const video = tile.querySelector("video");
+        const shouldRender = config.kind === "camera" || config.kind === "screen";
+        const stillStarting = Date.now() - (config.createdAt || 0) < 1800;
+        const rendering = video ? isVideoElementRendering(video) : false;
+        let message = "";
+
+        if (!videoTracks.length) {
+            message = config.kind === "screen" ? "Tap to reshare screen" : "Tap to share camera";
+        } else if (endedVideo) {
+            message = config.kind === "screen" ? "Screen share stopped. Tap to reshare." : "Camera stopped. Tap to restart.";
+        } else if (liveVideo && shouldRender && !rendering && !stillStarting) {
+            message = config.kind === "screen" ? "Screen looks stuck. Tap to reshare." : "Camera looks stuck. Tap to restart.";
+        }
+
+        overlay.classList.toggle("hidden", !message);
+        overlay.textContent = message;
     }
 
     function updateTrackState(config, videoButton, audioButton) {
@@ -1449,6 +1647,13 @@
         video.addEventListener("loadedmetadata", tryPlay, { once: true });
         video.addEventListener("canplay", tryPlay, { once: true });
         tryPlay();
+    }
+
+    function isVideoElementRendering(video) {
+        return video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+            && video.videoWidth > 0
+            && video.videoHeight > 0
+            && !video.paused;
     }
 
     function unlockRemoteAudio() {
