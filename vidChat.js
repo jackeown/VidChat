@@ -40,11 +40,16 @@
         dataRetryAttempts: new Map(),
         dataConnections: new Map(),
         dataLastSeen: new Map(),
+        connectionFailureCounts: new Map(),
+        streamFailureCounts: new Map(),
+        abandonedPeers: new Set(),
+        abandonedStreams: new Set(),
         knownPeers: new Set(),
         expectedRemoteStreams: new Map(),
         expectedRemoteStreamSince: new Map(),
         missingStreamRequests: new Map(),
         lastStreamManifestAt: 0,
+        lastPeerSyncAt: 0,
         peerNames: new Map(),
         tiles: new Map(),
         tileConfigs: new Map(),
@@ -319,6 +324,11 @@
             return;
         }
 
+        if (message.type === "peer-sync") {
+            handlePeerSync(peerId, message);
+            return;
+        }
+
         if (message.type === "stream-manifest") {
             handleStreamManifest(peerId, message);
             return;
@@ -356,6 +366,7 @@
         if (message.type === "peer-joined") {
             rememberPeer(message.peerId);
             connectData(message.peerId, false);
+            publishPeerSync(true);
             updatePeerStatus();
             return;
         }
@@ -899,6 +910,7 @@
     }
 
     function connectData(peerId, required) {
+        if (state.abandonedPeers.has(peerId)) return;
         if (!peerId || peerId === state.peer.id) return;
         const existing = state.dataConnections.get(peerId);
         if (existing && existing.open) return;
@@ -1223,16 +1235,26 @@
     function rememberPeer(peerId) {
         if (!peerId || peerId === roomPeerId || peerId === (state.peer && state.peer.id)) return;
         state.knownPeers.add(peerId);
+        state.abandonedPeers.delete(peerId);
+        state.connectionFailureCounts.delete(peerId);
     }
 
     function forgetPeer(peerId) {
         if (!peerId || peerId === roomPeerId) return;
         state.knownPeers.delete(peerId);
+        state.abandonedPeers.delete(peerId);
+        state.connectionFailureCounts.delete(peerId);
+        state.expectedRemoteStreams.delete(peerId);
+        clearMissingStreamRequestsForPeer(peerId);
     }
 
     function markPeerSeen(peerId) {
         if (!peerId) return;
         state.dataLastSeen.set(peerId, Date.now());
+        if (peerId !== roomPeerId) {
+            state.abandonedPeers.delete(peerId);
+            state.connectionFailureCounts.delete(peerId);
+        }
     }
 
     function startHealthLoop() {
@@ -1253,6 +1275,7 @@
         recoverPeerConnection();
         ensureRoomCoordinatorReachable();
         sendHealthPings();
+        publishPeerSync();
         publishLocalStreamManifest();
         requestMissingExpectedStreams();
         repairDeadConnections();
@@ -1328,9 +1351,37 @@
         }
     }
 
+    function publishPeerSync(force = false) {
+        const now = Date.now();
+        if (!force && now - state.lastPeerSyncAt < 10000) return;
+        state.lastPeerSyncAt = now;
+        const peers = currentPeerList();
+        for (const [peerId, conn] of state.dataConnections) {
+            if (!conn.open) continue;
+            conn.send({ type: "peer-sync", peers, timestamp: now });
+        }
+    }
+
+    function currentPeerList() {
+        const peers = new Set([...state.knownPeers, ...state.dataConnections.keys()]);
+        peers.delete(roomPeerId);
+        peers.delete(state.peer && state.peer.id);
+        return [...peers].filter((peerId) => !state.abandonedPeers.has(peerId));
+    }
+
+    function handlePeerSync(fromPeerId, message) {
+        rememberPeer(fromPeerId);
+        if (!Array.isArray(message.peers)) return;
+        message.peers.forEach((peerId) => {
+            if (!peerId || peerId === state.peer.id || peerId === roomPeerId) return;
+            rememberPeer(peerId);
+            if (!state.dataConnections.has(peerId)) connectData(peerId, false);
+        });
+    }
+
     function publishLocalStreamManifest(force = false) {
         const now = Date.now();
-        if (!force && now - state.lastStreamManifestAt < 2000) return;
+        if (!force && now - state.lastStreamManifestAt < 10000) return;
         state.lastStreamManifestAt = now;
 
         const streams = localStreamManifest();
@@ -1360,6 +1411,7 @@
         for (const streamInfo of message.streams) {
             if (!streamInfo || !streamInfo.kind) continue;
             expected.add(streamInfo.kind);
+            state.abandonedStreams.delete(expectedRemoteStreamKey(peerId, streamInfo.kind));
             trackExpectedRemoteStream(peerId, streamInfo.kind);
         }
         state.expectedRemoteStreams.set(peerId, expected);
@@ -1369,12 +1421,26 @@
     function requestMissingExpectedStreams() {
         for (const [peerId, kinds] of state.expectedRemoteStreams) {
             const conn = state.dataConnections.get(peerId);
-            if (!conn || !conn.open) continue;
+            if (!conn || !conn.open || state.abandonedPeers.has(peerId)) continue;
             for (const kind of kinds) {
-                const expectedKey = expectedRemoteStreamKey(peerId, kind);
-                const missingLongEnough = Date.now() - (state.expectedRemoteStreamSince.get(expectedKey) || Date.now()) > 5000;
-                if (missingLongEnough && !hasHealthyRemoteStream(peerId, kind)) {
+                const key = expectedRemoteStreamKey(peerId, kind);
+                if (state.abandonedStreams.has(key)) continue;
+
+                if (hasHealthyRemoteStream(peerId, kind)) {
+                    state.streamFailureCounts.delete(key);
+                    state.expectedRemoteStreamSince.delete(key);
+                    state.missingStreamRequests.delete(key);
+                    continue;
+                }
+
+                const failures = (state.streamFailureCounts.get(key) || 0) + 1;
+                state.streamFailureCounts.set(key, failures);
+                if (failures === 3) {
                     requestRemoteStream(peerId, kind, "health-check");
+                } else if (failures >= 12) {
+                    state.abandonedStreams.add(key);
+                    state.streamFailureCounts.delete(key);
+                    state.missingStreamRequests.delete(key);
                 }
             }
         }
@@ -1432,6 +1498,8 @@
         expected.delete(kind);
         state.missingStreamRequests.delete(`${peerId}:${kind}`);
         state.expectedRemoteStreamSince.delete(expectedRemoteStreamKey(peerId, kind));
+        state.streamFailureCounts.delete(expectedRemoteStreamKey(peerId, kind));
+        state.abandonedStreams.delete(expectedRemoteStreamKey(peerId, kind));
         if (!expected.size) state.expectedRemoteStreams.delete(peerId);
     }
 
@@ -1441,6 +1509,12 @@
         }
         for (const key of [...state.expectedRemoteStreamSince.keys()]) {
             if (key.startsWith(`${peerId}:`)) state.expectedRemoteStreamSince.delete(key);
+        }
+        for (const key of [...state.streamFailureCounts.keys()]) {
+            if (key.startsWith(`${peerId}:`)) state.streamFailureCounts.delete(key);
+        }
+        for (const key of [...state.abandonedStreams]) {
+            if (key.startsWith(`${peerId}:`)) state.abandonedStreams.delete(key);
         }
     }
 
@@ -1488,6 +1562,7 @@
 
     function reconnectKnownPeers() {
         for (const peerId of state.knownPeers) {
+            if (state.abandonedPeers.has(peerId)) continue;
             connectData(peerId, false);
         }
     }
@@ -1501,10 +1576,22 @@
 
     function repairDeadConnections() {
         const now = Date.now();
+        const connectedPeers = new Set();
+
         for (const [peerId, conn] of [...state.dataConnections]) {
-            const staleHeartbeat = now - (state.dataLastSeen.get(peerId) || 0) > 9000;
-            if (conn.open && !staleHeartbeat && !isPeerConnectionInterrupted(findPeerConnection(conn))) continue;
-            rememberPeer(peerId);
+            connectedPeers.add(peerId);
+            const lastSeen = state.dataLastSeen.get(peerId) || now;
+            const staleHeartbeat = now - lastSeen > 4500;
+            const failed = !conn.open || staleHeartbeat || isPeerConnectionInterrupted(findPeerConnection(conn));
+            if (!failed) {
+                if (peerId !== roomPeerId) state.connectionFailureCounts.delete(peerId);
+                continue;
+            }
+
+            const failures = (state.connectionFailureCounts.get(peerId) || 0) + 1;
+            state.connectionFailureCounts.set(peerId, failures);
+            if (failures < 3) continue;
+
             state.dataConnections.delete(peerId);
             state.dataLastSeen.delete(peerId);
             state.expectedRemoteStreams.delete(peerId);
@@ -1513,7 +1600,20 @@
             closeCallsForPeer(peerId);
             if (peerId === roomPeerId) {
                 scheduleCoordinatorClaim(randomCoordinatorDelay());
+            } else if (failures >= 12) {
+                abandonPeer(peerId);
             } else {
+                connectData(peerId, false);
+            }
+        }
+
+        for (const peerId of [...state.knownPeers]) {
+            if (connectedPeers.has(peerId) || state.abandonedPeers.has(peerId)) continue;
+            const failures = (state.connectionFailureCounts.get(peerId) || 0) + 1;
+            state.connectionFailureCounts.set(peerId, failures);
+            if (failures >= 12) {
+                abandonPeer(peerId);
+            } else if (failures >= 3) {
                 connectData(peerId, false);
             }
         }
@@ -1534,6 +1634,16 @@
         }
     }
 
+    function abandonPeer(peerId) {
+        state.abandonedPeers.add(peerId);
+        state.knownPeers.delete(peerId);
+        state.connectionFailureCounts.delete(peerId);
+        state.dataLastSeen.delete(peerId);
+        state.expectedRemoteStreams.delete(peerId);
+        clearMissingStreamRequestsForPeer(peerId);
+        removePeerTiles(peerId);
+    }
+
     function isPeerConnectionDead(pc) {
         if (!pc) return false;
         const stateValue = pc.connectionState || pc.iceConnectionState;
@@ -1552,6 +1662,7 @@
             if (!hasLiveTrack) continue;
 
             for (const [peerId, conn] of state.dataConnections) {
+                if (state.abandonedPeers.has(peerId)) continue;
                 if (!conn.open || peerId === state.peer.id) continue;
                 const key = `${kind}:${peerId}`;
                 if (force || !state.outboundCalls.has(key)) callPeer(peerId, kind, stream);
@@ -2441,7 +2552,7 @@
         peers.delete(exceptPeerId);
         peers.delete(roomPeerId);
         peers.delete(state.peer && state.peer.id);
-        return [...peers];
+        return [...peers].filter((peerId) => !state.abandonedPeers.has(peerId));
     }
 
     function randomCoordinatorDelay() {
