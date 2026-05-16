@@ -463,6 +463,10 @@ button.danger {
     padding: 0 10px;
 }
 
+.camera-switch-button.hidden {
+    display: none;
+}
+
 .preview-overlay {
     position: absolute;
     inset: 0;
@@ -1045,4 +1049,45 @@ button.danger {
 .route-badge.direct {
     border-color: #56d364;
     color: #56d364;
+}
+
+.connection-detail-grid {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: auto 1fr;
+}
+
+.connection-detail-grid dt {
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.connection-detail-grid dd {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.82rem;
+    word-break: break-word;
+}
+
+.connection-empty {
+    margin: 20px 0;
+    color: var(--muted);
+    text-align: center;
+    font-size: 0.9rem;
+}
+
+@media (max-width: 600px) {
+    .mute-icon {
+        width: 28px;
+        height: 28px;
+        font-size: 1rem;
+    }
+
+    .camera-switch-button {
+        min-width: 32px;
+        min-height: 28px;
+        font-size: 0.7rem;
+        padding: 0 6px;
+    }
 }
