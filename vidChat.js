@@ -21,6 +21,29 @@
         "jewel", "lagoon", "matrix", "nebula", "oasis", "portal", "reef", "signal",
         "spark", "studio"
     ];
+    const qualityLevels = ["auto", "low", "medium", "high", "max"];
+    const qualityLabels = {
+        auto: "Auto",
+        low: "Low (360p)",
+        medium: "Balanced (540p)",
+        high: "HD (720p)",
+        max: "Max (1080p)"
+    };
+    const qualityProfiles = {
+        camera: {
+            low: { scaleResolutionDownBy: 4, maxBitrate: 300000, maxFramerate: 12 },
+            medium: { scaleResolutionDownBy: 2, maxBitrate: 750000, maxFramerate: 20 },
+            high: { scaleResolutionDownBy: 1.5, maxBitrate: 1500000, maxFramerate: 30 },
+            max: { scaleResolutionDownBy: 1, maxBitrate: 3000000, maxFramerate: 30 }
+        },
+        screen: {
+            low: { scaleResolutionDownBy: 4, maxBitrate: 600000, maxFramerate: 10 },
+            medium: { scaleResolutionDownBy: 2, maxBitrate: 1200000, maxFramerate: 15 },
+            high: { scaleResolutionDownBy: 1.5, maxBitrate: 2500000, maxFramerate: 24 },
+            max: { scaleResolutionDownBy: 1, maxBitrate: 5000000, maxFramerate: 30 }
+        }
+    };
+    const qualityRank = new Map(qualityLevels.map((quality, index) => [quality, index]));
 
     const qs = new URLSearchParams(window.location.search);
     const roomId = sanitizeRoomId(qs.get("room")) || createRoomId();
@@ -62,13 +85,19 @@
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
         cameraFacingMode: localStorage.getItem("vidChatCameraFacingMode") || "",
+        cameraSendQuality: localStorage.getItem("vidChatCameraQuality") || "auto",
+        screenSendQuality: localStorage.getItem("vidChatScreenQuality") || "auto",
         cameraRecoveryAttempts: 0,
         cameraRecoveryTimer: null,
         healthTimer: null,
         networkRecoveryTimer: null,
         focusedTileId: null,
+        activeFeedModalId: null,
         fullscreenSelfViewPositions: new Map(),
         fullscreenSelfViewDrag: null,
+        remoteQualityPreferences: new Map(),
+        remoteQualityCaps: new Map(),
+        appliedQualityTargets: new Map(),
         zIndex: 1,
         unreadCount: 0,
         chatOpen: false,
@@ -138,6 +167,8 @@
         clearBgImage: document.getElementById("clearBgImage"),
         accentColorInput: document.getElementById("accentColorInput"),
         mirrorLocalCamera: document.getElementById("mirrorLocalCamera"),
+        cameraQualitySelect: document.getElementById("cameraQualitySelect"),
+        screenQualitySelect: document.getElementById("screenQualitySelect"),
         feedModal: document.getElementById("feedModal"),
         feedModalTitle: document.getElementById("feedModalTitle"),
         feedModalSubtitle: document.getElementById("feedModalSubtitle"),
@@ -334,6 +365,11 @@
 
         if (message.type === "stream-manifest") {
             handleStreamManifest(peerId, message);
+            return;
+        }
+
+        if (message.type === "quality-preference") {
+            handleQualityPreference(peerId, message);
             return;
         }
 
@@ -1121,6 +1157,7 @@
             addCameraTile(stream, false);
             sendLocalStreamToAll("camera", stream);
             publishLocalStreamManifest(true);
+            applyQualityPolicies(true);
             setStatus("Camera and microphone are now shared.");
         } catch (error) {
             setStatus(`Camera error: ${error.message}`);
@@ -1244,11 +1281,11 @@
     }
 
     function addLocalStream(kind, stream) {
-        state.localStreams.set(kind, stream);
-        addTile({
-            id: tileId("local", kind),
-            owner: "You",
-            subtitle: kind === "screen" ? screenSubtitle(stream) : "Camera and microphone",
+            state.localStreams.set(kind, stream);
+            addTile({
+                id: tileId("local", kind),
+                owner: "You",
+                subtitle: kind === "screen" ? screenSubtitle(stream) : "Camera and microphone",
             kind,
             stream,
             muted: true,
@@ -1257,6 +1294,7 @@
 
         sendLocalStreamToAll(kind, stream);
         publishLocalStreamManifest(true);
+        applyQualityPolicies(true);
         updateMediaButtons();
     }
 
@@ -1338,6 +1376,7 @@
             addCameraTile(stream, false);
             sendLocalStreamToAll("camera", stream);
             publishLocalStreamManifest(true);
+            applyQualityPolicies(true);
             updateMediaButtons();
         } catch (error) {
             setStatus(`Camera recovery error: ${error.message}`);
@@ -1423,6 +1462,9 @@
         });
 
         state.outboundCalls.set(key, call);
+        window.setTimeout(() => {
+            applyQualityToPeer(peerId, kind, true);
+        }, 0);
         call.on("close", () => clearOutboundCall(key, call, stream, attempt));
         call.on("error", () => clearOutboundCall(key, call, stream, attempt));
     }
@@ -1430,6 +1472,7 @@
     function clearOutboundCall(key, call, stream, attempt) {
         if (state.outboundCalls.get(key) !== call) return;
         state.outboundCalls.delete(key);
+        state.appliedQualityTargets.delete(key);
         scheduleMediaCallRetry(key, stream, attempt + 1);
     }
 
@@ -1467,6 +1510,7 @@
         state.abandonedPeers.delete(peerId);
         state.connectionFailureCounts.delete(peerId);
         state.expectedRemoteStreams.delete(peerId);
+        clearPeerQualityState(peerId);
         clearMissingStreamRequestsForPeer(peerId);
     }
 
@@ -1502,6 +1546,7 @@
         requestMissingExpectedStreams();
         repairDeadConnections();
         ensureLocalStreamsAreShared();
+        applyQualityPolicies();
         refreshMediaElements();
     }
 
@@ -1521,17 +1566,20 @@
         reconnectKnownPeers();
         repairDeadConnections();
         ensureLocalStreamsAreShared(true);
+        applyQualityPolicies(true);
         window.setTimeout(() => {
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
             repairDeadConnections();
+            applyQualityPolicies(true);
         }, 1800);
         window.setTimeout(() => {
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
             repairDeadConnections();
+            applyQualityPolicies(true);
         }, 4500);
         updatePeerStatus();
     }
@@ -1623,7 +1671,8 @@
             .map(([kind, stream]) => ({
                 kind,
                 hasVideo: stream.getVideoTracks().some((track) => track.readyState === "live"),
-                hasAudio: stream.getAudioTracks().some((track) => track.readyState === "live")
+                hasAudio: stream.getAudioTracks().some((track) => track.readyState === "live"),
+                qualityCap: localStreamQualityCap(kind)
             }));
     }
 
@@ -1633,11 +1682,22 @@
         for (const streamInfo of message.streams) {
             if (!streamInfo || !streamInfo.kind) continue;
             expected.add(streamInfo.kind);
+            state.remoteQualityCaps.set(remoteQualityKey(peerId, streamInfo.kind), normalizeQuality(streamInfo.qualityCap));
             state.abandonedStreams.delete(expectedRemoteStreamKey(peerId, streamInfo.kind));
             trackExpectedRemoteStream(peerId, streamInfo.kind);
         }
         state.expectedRemoteStreams.set(peerId, expected);
         clearUnexpectedRemoteStreamExpectations(peerId, expected);
+        refreshOpenFeedModal();
+    }
+
+    function handleQualityPreference(peerId, message) {
+        if (!message || !message.kind) return;
+        const quality = normalizeQuality(message.quality);
+        const key = remoteQualityKey(peerId, message.kind);
+        state.remoteQualityPreferences.set(key, quality);
+        applyQualityToPeer(peerId, message.kind, true);
+        refreshOpenFeedModal();
     }
 
     function requestMissingExpectedStreams() {
@@ -1665,6 +1725,59 @@
                     state.missingStreamRequests.delete(key);
                 }
             }
+        }
+    }
+
+    async function applyQualityPolicies(force = false) {
+        const jobs = [];
+        for (const [key, call] of state.outboundCalls) {
+            const [kind, peerId] = splitCallKey(key);
+            jobs.push(applyQualityToPeer(peerId, kind, force, call));
+        }
+        await Promise.allSettled(jobs);
+    }
+
+    async function applyQualityToPeer(peerId, kind, force = false, call = null) {
+        const key = remoteQualityKey(peerId, kind);
+        const outboundCall = call || state.outboundCalls.get(`${kind}:${peerId}`);
+        if (!outboundCall) return;
+
+        const pc = findPeerConnection(outboundCall);
+        if (!pc || typeof pc.getSenders !== "function" || typeof pc.getStats !== "function") return;
+        const sender = pc.getSenders().find((candidate) => candidate && candidate.track && candidate.track.kind === "video");
+        if (!sender || typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function") return;
+
+        let stats = null;
+        try {
+            stats = await pc.getStats();
+        } catch {
+            stats = null;
+        }
+
+        const target = resolveOutboundQuality(kind, peerId, stats);
+        if (!force && state.appliedQualityTargets.get(key) === target) return;
+
+        const params = sender.getParameters();
+        if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+        const encoding = { ...params.encodings[0] };
+        const profile = qualityProfile(kind, target);
+
+        if (profile) {
+            encoding.maxBitrate = profile.maxBitrate;
+            encoding.maxFramerate = profile.maxFramerate;
+        } else {
+            delete encoding.maxBitrate;
+            delete encoding.maxFramerate;
+        }
+
+        params.encodings[0] = encoding;
+        params.degradationPreference = kind === "screen" ? "maintain-resolution" : "balanced";
+
+        try {
+            await sender.setParameters(params);
+            state.appliedQualityTargets.set(key, target);
+        } catch (error) {
+            console.error("Failed to apply media quality", error);
         }
     }
 
@@ -1737,6 +1850,18 @@
         }
         for (const key of [...state.abandonedStreams]) {
             if (key.startsWith(`${peerId}:`)) state.abandonedStreams.delete(key);
+        }
+    }
+
+    function clearPeerQualityState(peerId) {
+        for (const key of [...state.remoteQualityPreferences.keys()]) {
+            if (key.startsWith(`${peerId}:`)) state.remoteQualityPreferences.delete(key);
+        }
+        for (const key of [...state.remoteQualityCaps.keys()]) {
+            if (key.startsWith(`${peerId}:`)) state.remoteQualityCaps.delete(key);
+        }
+        for (const key of [...state.appliedQualityTargets.keys()]) {
+            if (key.startsWith(`${peerId}:`)) state.appliedQualityTargets.delete(key);
         }
     }
 
@@ -1862,6 +1987,7 @@
         state.connectionFailureCounts.delete(peerId);
         state.dataLastSeen.delete(peerId);
         state.expectedRemoteStreams.delete(peerId);
+        clearPeerQualityState(peerId);
         clearMissingStreamRequestsForPeer(peerId);
         removePeerTiles(peerId);
     }
@@ -2183,11 +2309,33 @@
         const tile = state.tiles.get(id);
         if (!config || !tile) return;
 
+        state.activeFeedModalId = id;
+        renderFeedModal(config, tile);
+        if (!els.feedModal.open) els.feedModal.showModal();
+    }
+
+    function refreshOpenFeedModal() {
+        const id = state.activeFeedModalId;
+        if (!id || !els.feedModal.open) return;
+        const config = state.tileConfigs.get(id);
+        const tile = state.tiles.get(id);
+        if (!config || !tile) return;
+        updateFeedModalSubtitle(config);
+        if (config.local) return;
+
+        const peerId = splitCallKey(config.id)[0];
+        const qualitySelect = els.feedModalControls.querySelector(".quality-select");
+        if (qualitySelect) {
+            populateQualitySelect(qualitySelect, remoteQualityPreference(peerId, config.kind), remoteQualityCap(peerId, config.kind));
+        }
+    }
+
+    function renderFeedModal(config, tile) {
         els.feedModalTitle.textContent = tileTitle(config);
         els.feedModalControls.replaceChildren();
         updateFeedModalSubtitle(config);
 
-        const focusButton = makeModalButton("Focus video", () => focusTile(id));
+        const focusButton = makeModalButton("Focus video", () => focusTile(config.id));
         els.feedModalControls.appendChild(focusButton);
 
         if (config.preview && typeof config.previewAction === "function") {
@@ -2206,44 +2354,66 @@
 
             updateTrackState(config, videoButton, audioButton);
             els.feedModalControls.append(videoButton, audioButton);
-        } else {
-            const video = tile.querySelector("video");
-            const volumeLabel = document.createElement("label");
-            const volumeText = document.createElement("span");
-            const volume = document.createElement("input");
-
-            volumeLabel.className = "volume-control";
-            volumeText.textContent = "Audio";
-            volume.type = "range";
-            volume.className = "volume-slider";
-            volume.min = "0";
-            volume.max = "1";
-            volume.step = "0.05";
-            volume.value = String(video.volume || 1);
-            volume.addEventListener("input", () => {
-                video.volume = Number(volume.value);
-                video.muted = video.volume === 0;
-                if (video.muted) {
-                    pendingRemoteAudioElements.delete(video);
-                    video.dataset.remoteAudioMutedForAutoplay = "false";
-                } else {
-                    queueRemoteAudioUnlock(video);
-                    unlockRemoteAudio();
-                }
-            });
-
-            volumeLabel.append(volumeText, volume);
-            els.feedModalControls.appendChild(volumeLabel);
+            return;
         }
 
-        els.feedModal.showModal();
+        const video = tile.querySelector("video");
+        const peerId = splitCallKey(config.id)[0];
+        const qualityLabelRow = document.createElement("label");
+        const qualityLabelText = document.createElement("span");
+        const qualitySelect = document.createElement("select");
+        qualityLabelRow.className = "setting-row";
+        qualityLabelText.textContent = "Receive quality";
+        qualitySelect.className = "quality-select";
+        populateQualitySelect(qualitySelect, remoteQualityPreference(peerId, config.kind), remoteQualityCap(peerId, config.kind));
+        qualitySelect.addEventListener("change", () => {
+            const nextQuality = setRemoteQualityPreference(peerId, config.kind, qualitySelect.value);
+            qualitySelect.value = nextQuality;
+            updateFeedModalSubtitle(config);
+        });
+        qualityLabelRow.append(qualityLabelText, qualitySelect);
+
+        const volumeLabel = document.createElement("label");
+        const volumeText = document.createElement("span");
+        const volume = document.createElement("input");
+        volumeLabel.className = "volume-control";
+        volumeText.textContent = "Audio";
+        volume.type = "range";
+        volume.className = "volume-slider";
+        volume.min = "0";
+        volume.max = "1";
+        volume.step = "0.05";
+        volume.value = String(video.volume || 1);
+        volume.addEventListener("input", () => {
+            video.volume = Number(volume.value);
+            video.muted = video.volume === 0;
+            if (video.muted) {
+                pendingRemoteAudioElements.delete(video);
+                video.dataset.remoteAudioMutedForAutoplay = "false";
+            } else {
+                queueRemoteAudioUnlock(video);
+                unlockRemoteAudio();
+            }
+        });
+
+        volumeLabel.append(volumeText, volume);
+        els.feedModalControls.append(qualityLabelRow, volumeLabel);
     }
 
     function updateFeedModalSubtitle(config) {
         if (!config) return;
-        els.feedModalSubtitle.textContent = config.local
-            ? localSubtitle(config.kind, config.stream, Boolean(config.preview))
-            : config.subtitle;
+        if (config.local) {
+            els.feedModalSubtitle.textContent = localSubtitle(config.kind, config.stream, Boolean(config.preview));
+            return;
+        }
+
+        const peerId = splitCallKey(config.id)[0];
+        const cap = remoteQualityCap(peerId, config.kind);
+        const pref = remoteQualityPreference(peerId, config.kind);
+        const effectivePref = cap !== "auto" && pref !== "auto" && qualityRank.get(pref) > qualityRank.get(cap) ? cap : pref;
+        const suffix = cap === "auto" ? "Sender is using auto quality." : `Sender cap: ${qualityLabel(cap)}.`;
+        const selection = effectivePref === "auto" ? "Receiving in auto mode." : `Selected: ${qualityLabel(effectivePref)}.`;
+        els.feedModalSubtitle.textContent = `${config.subtitle} ${suffix} ${selection}`;
     }
 
     function makeModalButton(label, onClick, className) {
@@ -3292,6 +3462,18 @@
             localStorage.setItem("vidChatMirrorLocalCamera", String(state.mirrorLocalCamera));
             applyMirrorSetting();
         });
+        initQualitySelect(els.cameraQualitySelect, "camera", state.cameraSendQuality, (quality) => {
+            state.cameraSendQuality = quality;
+            localStorage.setItem("vidChatCameraQuality", quality);
+            publishLocalStreamManifest(true);
+            applyQualityPolicies(true);
+        });
+        initQualitySelect(els.screenQualitySelect, "screen", state.screenSendQuality, (quality) => {
+            state.screenSendQuality = quality;
+            localStorage.setItem("vidChatScreenQuality", quality);
+            publishLocalStreamManifest(true);
+            applyQualityPolicies(true);
+        });
         document.querySelectorAll("input[name='videoFit']").forEach((input) => {
             input.checked = input.value === state.videoFit;
             input.addEventListener("change", () => {
@@ -3315,6 +3497,9 @@
 
         els.chatModal.addEventListener("close", () => {
             state.chatOpen = false;
+        });
+        els.feedModal.addEventListener("close", () => {
+            state.activeFeedModalId = null;
         });
 
         els.attachFile.addEventListener("click", () => els.fileInput.click());
@@ -3396,6 +3581,129 @@
         document.documentElement.style.setProperty("--bg", state.bgColor);
         document.documentElement.style.setProperty("--bg-image", state.bgImage ? `url(${state.bgImage})` : "none");
         document.documentElement.style.setProperty("--accent", state.accentColor);
+    }
+
+    function initQualitySelect(select, kind, value, onChange) {
+        if (!select) return;
+        populateQualitySelect(select, value, "auto");
+        select.value = normalizeQuality(value);
+        select.addEventListener("change", () => {
+            const quality = normalizeQuality(select.value);
+            select.value = quality;
+            onChange(quality);
+        });
+    }
+
+    function populateQualitySelect(select, selectedQuality, maxQuality = "auto") {
+        if (!select) return;
+        const normalizedSelected = normalizeQuality(selectedQuality);
+        const normalizedMax = normalizeQuality(maxQuality);
+        select.replaceChildren();
+
+        for (const quality of qualityLevels) {
+            const option = document.createElement("option");
+            option.value = quality;
+            option.textContent = qualityLabels[quality] || quality;
+            option.disabled = normalizedMax !== "auto" && quality !== "auto" && qualityRank.get(quality) > qualityRank.get(normalizedMax);
+            select.appendChild(option);
+        }
+
+        if (normalizedMax !== "auto" && normalizedSelected !== "auto" && qualityRank.get(normalizedSelected) > qualityRank.get(normalizedMax)) {
+            select.value = normalizedMax;
+        } else {
+            select.value = normalizedSelected;
+        }
+    }
+
+    function normalizeQuality(value) {
+        return qualityRank.has(String(value)) ? String(value) : "auto";
+    }
+
+    function qualityLabel(value) {
+        return qualityLabels[normalizeQuality(value)] || qualityLabels.auto;
+    }
+
+    function qualityProfile(kind, level) {
+        const normalizedKind = kind === "screen" ? "screen" : "camera";
+        const normalizedLevel = normalizeQuality(level);
+        if (normalizedLevel === "auto") return null;
+        return qualityProfiles[normalizedKind][normalizedLevel] || null;
+    }
+
+    function localStreamQualityCap(kind) {
+        return normalizeQuality(kind === "screen" ? state.screenSendQuality : state.cameraSendQuality);
+    }
+
+    function remoteQualityKey(peerId, kind) {
+        return `${peerId}:${kind}`;
+    }
+
+    function remoteQualityPreference(peerId, kind) {
+        return normalizeQuality(state.remoteQualityPreferences.get(remoteQualityKey(peerId, kind)) || "auto");
+    }
+
+    function remoteQualityCap(peerId, kind) {
+        return normalizeQuality(state.remoteQualityCaps.get(remoteQualityKey(peerId, kind)) || "auto");
+    }
+
+    function setRemoteQualityPreference(peerId, kind, quality, send = true) {
+        const key = remoteQualityKey(peerId, kind);
+        const cap = remoteQualityCap(peerId, kind);
+        const normalized = normalizeQuality(quality);
+        const nextQuality = cap !== "auto" && normalized !== "auto" && qualityRank.get(normalized) > qualityRank.get(cap) ? cap : normalized;
+        state.remoteQualityPreferences.set(key, nextQuality);
+        if (send) {
+            sendToPeer(peerId, { type: "quality-preference", kind, quality: nextQuality });
+        }
+        return nextQuality;
+    }
+
+    function refreshOpenFeedModal() {
+        const id = state.activeFeedModalId;
+        if (!id || !els.feedModal.open) return;
+        const config = state.tileConfigs.get(id);
+        const tile = state.tiles.get(id);
+        if (!config || !tile) return;
+        renderFeedModal(config, tile);
+    }
+
+    function autoQualityForConnection(kind, stats) {
+        const pair = selectedCandidatePair(stats);
+        const outbound = outboundVideoStats(stats);
+        if (!pair.pair || !outbound) return "high";
+        const rtt = pair.pair && typeof pair.pair.currentRoundTripTime === "number" ? pair.pair.currentRoundTripTime * 1000 : 0;
+        const available = pair.pair && typeof pair.pair.availableOutgoingBitrate === "number" ? pair.pair.availableOutgoingBitrate : 0;
+        const packetsSent = outbound && typeof outbound.packetsSent === "number" ? outbound.packetsSent : 0;
+        const packetsLost = outbound && typeof outbound.packetsLost === "number" ? outbound.packetsLost : 0;
+        const loss = packetsSent + packetsLost > 0 ? packetsLost / (packetsSent + packetsLost) : 0;
+        const lowFloor = kind === "screen" ? 600000 : 300000;
+        const mediumFloor = kind === "screen" ? 1200000 : 700000;
+        const highFloor = kind === "screen" ? 2500000 : 1400000;
+
+        if (loss > 0.12 || rtt > 550 || (available && available < lowFloor)) return "low";
+        if (loss > 0.06 || rtt > 350 || (available && available < mediumFloor)) return "medium";
+        if (loss > 0.02 || rtt > 220 || (available && available < highFloor)) return "high";
+        return "max";
+    }
+
+    function outboundVideoStats(stats) {
+        if (!stats) return null;
+        let best = null;
+        stats.forEach((report) => {
+            if (report.type !== "outbound-rtp" || report.kind !== "video") return;
+            if (!best || (report.bytesSent || 0) > (best.bytesSent || 0)) best = report;
+        });
+        return best;
+    }
+
+    function resolveOutboundQuality(kind, peerId, stats) {
+        const requested = remoteQualityPreference(peerId, kind);
+        const localCap = localStreamQualityCap(kind);
+        const target = requested === "auto" ? autoQualityForConnection(kind, stats) : requested;
+        if (localCap !== "auto" && qualityRank.get(target) > qualityRank.get(localCap)) {
+            return localCap;
+        }
+        return target;
     }
 
     function toggleScreenAudioMute() {

@@ -974,6 +974,17 @@ button.danger {
     accent-color: var(--accent);
 }
 
+.setting-row select {
+    width: min(220px, 55%);
+    min-width: 0;
+    min-height: 34px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #0c0f12;
+    color: var(--text);
+    padding: 0 10px;
+}
+
 .text-setting input {
     width: min(220px, 55%);
     min-width: 0;
