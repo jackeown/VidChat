@@ -172,8 +172,6 @@
         clearBgImage: document.getElementById("clearBgImage"),
         accentColorInput: document.getElementById("accentColorInput"),
         mirrorLocalCamera: document.getElementById("mirrorLocalCamera"),
-        cameraQualitySelect: document.getElementById("cameraQualitySelect"),
-        screenQualitySelect: document.getElementById("screenQualitySelect"),
         feedModal: document.getElementById("feedModal"),
         feedModalTitle: document.getElementById("feedModalTitle"),
         feedModalSubtitle: document.getElementById("feedModalSubtitle"),
@@ -1364,10 +1362,6 @@
         shareLocalStream(kind, stream);
     }
 
-    function replaceLocalStream(kind, stream) {
-        shareLocalStream(kind, stream, { replaceExisting: true });
-    }
-
     function shareLocalStream(kind, stream, options = {}) {
         const replaceExisting = Boolean(options.replaceExisting);
         const currentStream = state.localStreams.get(kind);
@@ -2474,8 +2468,11 @@
         const config = state.tileConfigs.get(id);
         const tile = state.tiles.get(id);
         if (!config || !tile) return;
+        if (config.local) {
+            renderFeedModal(config, tile);
+            return;
+        }
         updateFeedModalSubtitle(config);
-        if (config.local) return;
 
         const peerId = splitCallKey(config.id)[0];
         const qualitySelect = els.feedModalControls.querySelector(".quality-select");
@@ -2497,21 +2494,24 @@
         }
 
         if (config.local) {
-            const videoButton = makeModalButton("", () => {
-                if (config.kind === "screen") {
-                    if (config.stream.getVideoTracks().length > 0) {
-                        stopLocalStream("screen");
-                        if (els.screenShareModal.open) els.screenShareModal.close();
-                    } else {
-                        startScreenShare(true);
-                    }
-                    return;
-                }
+            els.feedModalControls.appendChild(createSenderQualityRow(config));
 
+            if (config.kind === "screen") {
+                els.feedModalControls.appendChild(makeModalButton("Manage screen sharing", () => {
+                    openScreenShareManager();
+                }));
+                els.feedModalControls.appendChild(makeModalButton("Stop sharing", () => {
+                    stopLocalStream("screen");
+                    if (els.screenShareModal.open) els.screenShareModal.close();
+                }, "danger"));
+                return;
+            }
+
+            const videoButton = makeModalButton("Mute video", () => {
                 toggleTracks(config.stream.getVideoTracks());
                 updateTrackState(config, videoButton, audioButton);
             });
-            const audioButton = makeModalButton("", () => {
+            const audioButton = makeModalButton("Mute mic", () => {
                 toggleTracks(config.stream.getAudioTracks());
                 updateTrackState(config, videoButton, audioButton);
             });
@@ -2578,6 +2578,33 @@
         const suffix = cap === "auto" ? "Sender is using auto quality." : `Sender cap: ${qualityLabel(cap)}.`;
         const selection = effectivePref === "auto" ? "Receiving in auto mode." : `Selected: ${qualityLabel(effectivePref)}.`;
         els.feedModalSubtitle.textContent = `${config.subtitle} ${suffix} ${selection}`;
+    }
+
+    function createSenderQualityRow(config) {
+        const row = document.createElement("label");
+        row.className = "setting-row";
+
+        const label = document.createElement("span");
+        label.textContent = "Send quality";
+
+        const select = document.createElement("select");
+        const kind = config.kind === "screen" ? "screen" : "camera";
+        const storedQuality = kind === "screen" ? state.screenSendQuality : state.cameraSendQuality;
+        initQualitySelect(select, kind, storedQuality, (quality) => {
+            if (kind === "screen") {
+                state.screenSendQuality = quality;
+                localStorage.setItem("vidChatScreenQuality", quality);
+            } else {
+                state.cameraSendQuality = quality;
+                localStorage.setItem("vidChatCameraQuality", quality);
+            }
+            publishLocalStreamManifest(true);
+            applyQualityPolicies(true);
+            updateFeedModalSubtitle(config);
+        });
+
+        row.append(label, select);
+        return row;
     }
 
     function makeModalButton(label, onClick, className) {
@@ -3670,18 +3697,6 @@
             state.mirrorLocalCamera = els.mirrorLocalCamera.checked;
             localStorage.setItem("vidChatMirrorLocalCamera", String(state.mirrorLocalCamera));
             applyMirrorSetting();
-        });
-        initQualitySelect(els.cameraQualitySelect, "camera", state.cameraSendQuality, (quality) => {
-            state.cameraSendQuality = quality;
-            localStorage.setItem("vidChatCameraQuality", quality);
-            publishLocalStreamManifest(true);
-            applyQualityPolicies(true);
-        });
-        initQualitySelect(els.screenQualitySelect, "screen", state.screenSendQuality, (quality) => {
-            state.screenSendQuality = quality;
-            localStorage.setItem("vidChatScreenQuality", quality);
-            publishLocalStreamManifest(true);
-            applyQualityPolicies(true);
         });
         document.querySelectorAll("input[name='videoFit']").forEach((input) => {
             input.checked = input.value === state.videoFit;
