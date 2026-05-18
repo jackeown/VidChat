@@ -44,6 +44,7 @@
         }
     };
     const qualityRank = new Map(qualityLevels.map((quality, index) => [quality, index]));
+    const connectionStaleLimitMs = 10000;
 
     const qs = new URLSearchParams(window.location.search);
     const roomId = sanitizeRoomId(qs.get("room")) || createRoomId();
@@ -154,6 +155,10 @@
         emojiAutocomplete: document.getElementById("emojiAutocomplete"),
         appSettingsButton: document.getElementById("appSettingsButton"),
         appSettingsModal: document.getElementById("appSettingsModal"),
+        screenShareModal: document.getElementById("screenShareModal"),
+        screenShareModalTitle: document.getElementById("screenShareModalTitle"),
+        screenShareModalSubtitle: document.getElementById("screenShareModalSubtitle"),
+        screenShareModalControls: document.getElementById("screenShareModalControls"),
         connectionSummary: document.getElementById("connectionSummary"),
         connectionSummaryMeta: document.getElementById("connectionSummaryMeta"),
         refreshConnections: document.getElementById("refreshConnections"),
@@ -1211,10 +1216,14 @@
 
     async function toggleScreen() {
         if (state.localStreams.has("screen")) {
-            stopLocalStream("screen");
+            openScreenShareManager();
             return;
         }
 
+        await startScreenShare();
+    }
+
+    async function startScreenShare(replaceExisting = false) {
         if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== "function") {
             showScreenShareUnsupported();
             return;
@@ -1230,7 +1239,17 @@
                 video: true,
                 audio: true
             });
-            addLocalStream("screen", stream);
+
+            if (replaceExisting) {
+                replaceLocalScreenShare(stream);
+            } else {
+                addLocalStream("screen", stream);
+            }
+
+            if (els.screenShareModal.open) {
+                renderScreenShareManager();
+            }
+
             const [videoTrack] = stream.getVideoTracks();
             if (videoTrack) videoTrack.addEventListener("ended", () => stopLocalStream("screen"));
         } catch (error) {
@@ -1280,12 +1299,91 @@
         setStatus(message);
     }
 
+    function replaceLocalScreenShare(stream) {
+        const current = state.localStreams.get("screen");
+        if (current) {
+            closeOutboundCalls("screen");
+            removeTile(tileId("local", "screen"));
+            current.getTracks().forEach((track) => track.stop());
+        }
+
+        state.localStreams.set("screen", stream);
+        addTile({
+            id: tileId("local", "screen"),
+            owner: "You",
+            subtitle: screenSubtitle(stream),
+            kind: "screen",
+            stream,
+            muted: true,
+            local: true
+        });
+
+        sendLocalStreamToAll("screen", stream);
+        publishLocalStreamManifest(true);
+        applyQualityPolicies(true);
+        updateMediaButtons();
+    }
+
+    function openScreenShareManager() {
+        if (!state.localStreams.has("screen")) return;
+        renderScreenShareManager();
+        if (!els.screenShareModal.open) els.screenShareModal.showModal();
+    }
+
+    function renderScreenShareManager() {
+        const stream = state.localStreams.get("screen");
+        els.screenShareModalTitle.textContent = "Screen Sharing";
+        els.screenShareModalControls.replaceChildren();
+
+        if (!stream) {
+            els.screenShareModalSubtitle.textContent = "No screen is currently being shared.";
+            els.screenShareModalControls.appendChild(makeModalButton("Share screen", () => startScreenShare(), "primary"));
+            return;
+        }
+
+        const tracks = stream.getVideoTracks();
+        const audioTracks = stream.getAudioTracks();
+        const screenRow = document.createElement("div");
+        screenRow.className = "setting-row";
+        const screenLabel = document.createElement("span");
+        const screenValue = document.createElement("span");
+        screenLabel.textContent = "Current screen";
+        screenValue.textContent = `${tracks.length ? "Active" : "Inactive"}${audioTracks.length ? " with audio" : ""}`;
+        screenRow.append(screenLabel, screenValue);
+
+        els.screenShareModalSubtitle.textContent = "Choose another screen or stop the current share.";
+        els.screenShareModalControls.appendChild(screenRow);
+        els.screenShareModalControls.appendChild(makeModalButton("Share another screen", () => startScreenShare(true), "primary"));
+        els.screenShareModalControls.appendChild(makeModalButton("Stop sharing", () => {
+            stopLocalStream("screen");
+            if (els.screenShareModal.open) els.screenShareModal.close();
+        }, "danger"));
+    }
+
     function addLocalStream(kind, stream) {
-            state.localStreams.set(kind, stream);
-            addTile({
-                id: tileId("local", kind),
-                owner: "You",
-                subtitle: kind === "screen" ? screenSubtitle(stream) : "Camera and microphone",
+        shareLocalStream(kind, stream);
+    }
+
+    function replaceLocalStream(kind, stream) {
+        shareLocalStream(kind, stream, { replaceExisting: true });
+    }
+
+    function shareLocalStream(kind, stream, options = {}) {
+        const replaceExisting = Boolean(options.replaceExisting);
+        const currentStream = state.localStreams.get(kind);
+        if (currentStream && currentStream !== stream) {
+            if (replaceExisting) {
+                closeOutboundCalls(kind);
+                removeTile(tileId("local", kind));
+            }
+            currentStream.getTracks().forEach((track) => track.stop());
+        }
+
+        state.localStreams.set(kind, stream);
+        addTile({
+            id: tileId("local", kind),
+            owner: "You",
+            subtitle: kind === "screen" ? screenSubtitle(stream) : "Camera and microphone",
             kind,
             stream,
             muted: true,
@@ -1927,9 +2025,10 @@
 
         for (const [peerId, conn] of [...state.dataConnections]) {
             connectedPeers.add(peerId);
-            const lastSeen = state.dataLastSeen.get(peerId) || now;
-            const staleHeartbeat = now - lastSeen > 4500;
-            const failed = !conn.open || staleHeartbeat || isPeerConnectionInterrupted(findPeerConnection(conn));
+            const lastSeen = state.dataLastSeen.get(peerId);
+            const heartbeatFailed = lastSeen === 0;
+            const staleHeartbeat = typeof lastSeen === "number" && lastSeen > 0 && now - lastSeen > connectionStaleLimitMs;
+            const failed = !conn.open || heartbeatFailed || staleHeartbeat || isPeerConnectionInterrupted(findPeerConnection(conn));
             if (!failed) {
                 if (peerId !== roomPeerId) state.connectionFailureCounts.delete(peerId);
                 continue;
@@ -1947,7 +2046,7 @@
             closeCallsForPeer(peerId);
             if (peerId === roomPeerId) {
                 scheduleCoordinatorClaim(randomCoordinatorDelay());
-            } else if (failures >= 12) {
+            } else if (staleHeartbeat || failures >= 10) {
                 abandonPeer(peerId);
             } else {
                 connectData(peerId, false);
@@ -2191,6 +2290,57 @@
         });
     }
 
+    function isEditableTarget(target) {
+        const element = target instanceof Element ? target : null;
+        if (!element) return false;
+        return Boolean(element.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']"));
+    }
+
+    function localMediaStreams() {
+        return [...new Set([...state.localStreams.values(), ...state.previewStreams.values()])];
+    }
+
+    function refreshActiveFeedModal() {
+        const id = state.activeFeedModalId;
+        if (!id || !els.feedModal.open) return;
+        const config = state.tileConfigs.get(id);
+        const tile = state.tiles.get(id);
+        if (!config || !tile) return;
+
+        if (config.local) {
+            renderFeedModal(config, tile);
+            return;
+        }
+
+        refreshOpenFeedModal();
+    }
+
+    function toggleLocalMedia(kind) {
+        const tracks = [];
+        for (const stream of localMediaStreams()) {
+            if (kind === "audio") {
+                tracks.push(...stream.getAudioTracks());
+            } else {
+                tracks.push(...stream.getVideoTracks());
+            }
+        }
+
+        if (!tracks.length) return false;
+
+        toggleTracks(tracks);
+
+        for (const [id, config] of state.tileConfigs) {
+            if (!config.local) continue;
+            updateLocalTileState(id);
+            updateLocalMediaPrompt(config);
+        }
+
+        publishLocalStreamManifest(true);
+        updateMediaButtons();
+        refreshActiveFeedModal();
+        return true;
+    }
+
     function updateLocalTileState(id) {
         const tile = state.tiles.get(id);
         const config = state.tileConfigs.get(id);
@@ -2235,12 +2385,16 @@
         const videoOn = videoTracks.some((track) => track.enabled);
         const audioOn = audioTracks.some((track) => track.enabled);
 
-        videoButton.textContent = videoTracks.length === 0 ? "No video" : kind === "screen" ? (videoOn ? "Hide" : "Show") : (videoOn ? "Mute video" : "Show video");
+        if (kind === "screen") {
+            videoButton.textContent = videoTracks.length === 0 ? "Share screen" : "Stop sharing";
+        } else {
+            videoButton.textContent = videoTracks.length === 0 ? "No video" : (videoOn ? "Mute video" : "Show video");
+        }
         audioButton.textContent = audioTracks.length === 0 ? "No audio" : kind === "screen" ? (audioOn ? "Mute audio" : "Unmute audio") : (audioOn ? "Mute mic" : "Unmute mic");
 
-        videoButton.classList.toggle("danger", videoOn);
+        videoButton.classList.toggle("danger", kind === "screen" ? videoTracks.length > 0 : videoOn);
         audioButton.classList.toggle("danger", audioOn);
-        videoButton.disabled = videoTracks.length === 0;
+        videoButton.disabled = kind === "screen" ? false : videoTracks.length === 0;
         audioButton.disabled = audioTracks.length === 0;
         updateLocalTileState(config.id);
 
@@ -2344,6 +2498,16 @@
 
         if (config.local) {
             const videoButton = makeModalButton("", () => {
+                if (config.kind === "screen") {
+                    if (config.stream.getVideoTracks().length > 0) {
+                        stopLocalStream("screen");
+                        if (els.screenShareModal.open) els.screenShareModal.close();
+                    } else {
+                        startScreenShare(true);
+                    }
+                    return;
+                }
+
                 toggleTracks(config.stream.getVideoTracks());
                 updateTrackState(config, videoButton, audioButton);
             });
@@ -3139,7 +3303,14 @@
 
         summaries.forEach((summary) => els.connectionSummary.appendChild(renderConnectionSummary(summary)));
         const relayed = summaries.filter((summary) => summary.route === "turn").length;
-        els.connectionSummaryMeta.textContent = `${summaries.length} connection${summaries.length === 1 ? "" : "s"}; ${relayed} using TURN relay.`;
+        const staleEntries = summaries.filter((summary) => typeof summary.staleMs === "number");
+        const staleCount = staleEntries.filter((summary) => summary.staleMs >= connectionStaleLimitMs).length;
+        const failedCount = summaries.filter((summary) => summary.heartbeatFailed).length;
+        const oldestStale = staleEntries.length ? Math.max(...staleEntries.map((summary) => summary.staleMs)) : null;
+        const freshnessText = oldestStale == null
+            ? (failedCount ? `${failedCount} heartbeat${failedCount === 1 ? "" : "s"} failed` : "freshness unavailable")
+            : `${staleCount + failedCount} stale; oldest ${formatConnectionAge(oldestStale)}`;
+        els.connectionSummaryMeta.textContent = `${summaries.length} connection${summaries.length === 1 ? "" : "s"}; ${relayed} using TURN relay; ${freshnessText}.`;
     }
 
     function collectConnectionEntries() {
@@ -3181,6 +3352,9 @@
     }
 
     async function readConnectionSummary(entry) {
+        const lastSeenAt = state.dataLastSeen.get(entry.peerId);
+        const heartbeatFailed = lastSeenAt === 0;
+        const staleMs = typeof lastSeenAt === "number" && lastSeenAt > 0 ? Math.max(0, Date.now() - lastSeenAt) : null;
         const base = {
             ...entry,
             peerLabel: state.peerNames.get(entry.peerId) || shortPeer(entry.peerId),
@@ -3191,6 +3365,10 @@
             remote: null,
             pair: null,
             audio: null,
+            lastSeenAt: typeof lastSeenAt === "number" ? lastSeenAt : null,
+            heartbeatFailed,
+            staleMs,
+            freshness: connectionFreshnessLabel(lastSeenAt),
             error: ""
         };
 
@@ -3247,6 +3425,7 @@
     function renderConnectionSummary(summary) {
         const item = document.createElement("article");
         item.className = `connection-card ${summary.route}`;
+        item.classList.toggle("stale", summary.heartbeatFailed || (typeof summary.staleMs === "number" && summary.staleMs >= connectionStaleLimitMs));
 
         const header = document.createElement("div");
         header.className = "connection-card-header";
@@ -3266,6 +3445,7 @@
         const grid = document.createElement("dl");
         grid.className = "connection-detail-grid";
         addDetail(grid, "State", `${summary.state} / ICE ${summary.iceState}`);
+        addDetail(grid, "Freshness", summary.freshness);
         addDetail(grid, "Local", candidateLabel(summary.local));
         addDetail(grid, "Remote", candidateLabel(summary.remote));
         addDetail(grid, "Traffic", trafficLabel(summary.pair));
@@ -3305,6 +3485,32 @@
         const received = typeof pair.bytesReceived === "number" ? formatBytes(pair.bytesReceived) : "0 Bytes";
         const rtt = typeof pair.currentRoundTripTime === "number" ? `; RTT ${Math.round(pair.currentRoundTripTime * 1000)} ms` : "";
         return `${sent} sent, ${received} received${rtt}`;
+    }
+
+    function connectionFreshnessLabel(lastSeenAt) {
+        if (lastSeenAt == null) return "No heartbeat yet";
+        if (lastSeenAt === 0) return "Heartbeat check failed";
+
+        const age = Math.max(0, Date.now() - lastSeenAt);
+        if (age < 4000) return "Seen just now";
+        if (age >= connectionStaleLimitMs) return `Stale for ${formatConnectionAge(age)}`;
+        return `Seen ${formatConnectionAge(age)} ago`;
+    }
+
+    function formatConnectionAge(ms) {
+        const totalSeconds = Math.max(0, Math.round(ms / 1000));
+        if (totalSeconds < 5) return "just now";
+        if (totalSeconds < 60) return `${totalSeconds}s`;
+
+        const totalMinutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        if (totalMinutes < 60) {
+            return seconds ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+        }
+
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
     }
 
     function mediaAudioSummary(entry, stats) {
@@ -3391,6 +3597,9 @@
             els.appSettingsModal.showModal();
         });
         els.appSettingsModal.addEventListener("close", stopConnectionSummaryUpdates);
+        els.screenShareModal.addEventListener("close", () => {
+            refreshActiveFeedModal();
+        });
         els.refreshConnections.addEventListener("click", updateConnectionSummary);
         els.displayName.value = state.displayName;
         els.displayName.addEventListener("change", () => updateDisplayName(els.displayName.value));
@@ -3555,11 +3764,26 @@
         });
 
         document.addEventListener("keydown", (event) => {
-            if (event.key !== "Escape") return;
-            for (const tile of state.tiles.values()) {
-                tile.classList.remove("expanded");
+            if (event.key === "Escape") {
+                for (const tile of state.tiles.values()) {
+                    tile.classList.remove("expanded");
+                }
+                syncFullscreenSelfView(null);
+                return;
             }
-            syncFullscreenSelfView(null);
+
+            if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+            if (isEditableTarget(event.target)) return;
+
+            const key = event.key.toLowerCase();
+            if (key === "m") {
+                if (toggleLocalMedia("audio")) event.preventDefault();
+                return;
+            }
+
+            if (key === "v") {
+                if (toggleLocalMedia("video")) event.preventDefault();
+            }
         });
     }
 
@@ -3735,8 +3959,10 @@
         els.cameraToggle.textContent = hasCamera ? "Remove Video" : "Share Camera/Mic";
         els.cameraToggle.classList.toggle("danger", hasCamera);
 
-        els.screenToggle.textContent = screenOn ? "Stop screen" : "Share screen";
-        els.screenToggle.classList.toggle("danger", screenOn);
+        els.screenToggle.textContent = screenOn ? "Screen Sharing" : "Share screen";
+        els.screenToggle.title = screenOn ? "Manage screen sharing" : "Share screen";
+        els.screenToggle.classList.toggle("danger", false);
+        els.screenToggle.classList.toggle("primary", screenOn);
 
         els.screenAudioMute.classList.toggle("hidden", !screenOn || !hasScreenAudio);
         els.screenAudioMute.textContent = screenAudioMuted ? "Unmute Screen" : "Mute Screen";

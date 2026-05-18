@@ -1054,6 +1054,10 @@ button.danger {
     border-color: color-mix(in srgb, #56d364 55%, var(--line));
 }
 
+.connection-card.stale {
+    border-color: color-mix(in srgb, var(--danger) 65%, var(--line));
+}
+
 .connection-card-header {
     display: flex;
     align-items: flex-start;
