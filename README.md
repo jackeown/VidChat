@@ -48,28 +48,6 @@ Deploy the repository as static files. For GitHub Pages, publish the repo root o
 <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
 ```
 
-## TURN Configuration
-
-The app ships with public Google STUN servers and reads optional TURN servers from:
-
-```js
-window.VIDCHAT_TURN_SERVERS = [
-  {
-    urls: [
-      "turn:turn.cloudflare.com:3478?transport=udp",
-      "turn:turn.cloudflare.com:3478?transport=tcp",
-      "turn:turn.cloudflare.com:80?transport=tcp",
-      "turns:turn.cloudflare.com:5349?transport=tcp",
-      "turns:turn.cloudflare.com:443?transport=tcp"
-    ],
-    username: "generated-turn-username",
-    credential: "generated-turn-credential"
-  }
-];
-```
-
-Load that assignment before `vidChat.js`. Cloudflare TURN credentials must be generated server-side and expire after a configured TTL, so do not hardcode the TURN key itself into this static site.
-
 ## Usage
 
 1. Open the app.
@@ -81,4 +59,4 @@ In chat, type `:` to open emoji autocomplete, or send full shortcodes such as `:
 
 ## Notes
 
-MeliChat uses PeerJS for signaling and WebRTC for media/data connections. Media and chat traffic are peer-to-peer once connections are established, but users still need access to the PeerJS signaling service and configured STUN/TURN servers.
+MeliChat uses PeerJS for signaling and WebRTC for media/data connections. Media and chat traffic are peer-to-peer once connections are established, but users still need access to the PeerJS signaling service and a working network connection.

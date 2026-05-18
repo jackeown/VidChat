@@ -352,6 +352,8 @@
                 message.history.forEach((msg) => {
                     if (msg.type === "chat") {
                         addChatMessage(msg.peerId, msg.text, msg.timestamp);
+                    } else if (msg.type === "chat-image") {
+                        addChatImageMessage(msg.peerId, msg.src, msg.timestamp, msg.caption || msg.name || "");
                     } else if (msg.type === "file" && msg.data) {
                         addFileMessage(msg.peerId, msg.name, msg.size, msg.data, msg.timestamp);
                     }
@@ -396,6 +398,10 @@
             addChatMessage(peerId, message.text, message.timestamp);
         }
 
+        if (message.type === "chat-image") {
+            addChatImageMessage(peerId, message.src, message.timestamp, message.caption || message.name || "");
+        }
+
         if (message.type === "file" && message.data) {
             addFileMessage(peerId, message.name, message.size, message.data, message.timestamp);
         }
@@ -427,12 +433,27 @@
 
         els.chatInput.value = "";
         els.emojiAutocomplete.classList.add("hidden");
+
+        const standaloneImageUrl = normalizeChatImageUrl(text);
+        if (standaloneImageUrl) {
+            const msg = { type: "chat-image", src: standaloneImageUrl, timestamp: Date.now(), caption: "" };
+            addChatImageMessage("local", msg.src, msg.timestamp, msg.caption);
+            broadcast(msg);
+            return;
+        }
+
         const msg = { type: "chat", text, timestamp: Date.now() };
         addChatMessage("local", msg.text, msg.timestamp);
         broadcast(msg);
     }
 
     function addChatMessage(peerId, text, timestamp) {
+        const imageUrl = normalizeChatImageUrl(text);
+        if (imageUrl) {
+            addChatImageMessage(peerId, imageUrl, timestamp, "");
+            return;
+        }
+
         const local = peerId === "local";
         const author = local ? state.displayName : (state.peerNames.get(peerId) || shortPeer(peerId));
         const timeStr = new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -466,6 +487,81 @@
         }
     }
 
+    function addChatImageMessage(peerId, src, timestamp, caption) {
+        const local = peerId === "local";
+        const author = local ? state.displayName : (state.peerNames.get(peerId) || shortPeer(peerId));
+        const timeStr = new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const safeSrc = safeChatImageSource(src);
+        if (!safeSrc) {
+            addChatMessage(peerId, caption || "[image]", timestamp);
+            return;
+        }
+
+        const messageEl = document.createElement("div");
+        messageEl.className = `chat-message ${local ? "local" : ""}`;
+
+        const authorEl = document.createElement("span");
+        authorEl.className = "author";
+        authorEl.textContent = author;
+
+        const timeEl = document.createElement("span");
+        timeEl.className = "timestamp";
+        timeEl.textContent = timeStr;
+        authorEl.appendChild(timeEl);
+
+        const contentEl = document.createElement("div");
+        contentEl.className = "content chat-image";
+
+        const img = document.createElement("img");
+        img.alt = caption || "Shared image";
+        img.src = safeSrc;
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.referrerPolicy = "no-referrer";
+
+        contentEl.appendChild(img);
+
+        if (caption) {
+            const captionEl = document.createElement("div");
+            captionEl.className = "image-caption";
+            captionEl.textContent = caption;
+            contentEl.appendChild(captionEl);
+        }
+
+        messageEl.append(authorEl, contentEl);
+        els.chatHistory.appendChild(messageEl);
+        els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
+
+        state.chatHistory.push({ peerId, author, src: safeSrc, caption: caption || "", timestamp, type: "chat-image" });
+
+        if (!local && !state.chatOpen) {
+            state.unreadCount++;
+            updateChatBadge();
+        }
+    }
+
+    async function sendClipboardImage(file) {
+        if (!file || !file.type || !file.type.startsWith("image/")) return;
+        const src = await blobToDataUrl(file);
+        const msg = {
+            type: "chat-image",
+            src,
+            timestamp: Date.now(),
+            caption: file.name || "Pasted image"
+        };
+        addChatImageMessage("local", msg.src, msg.timestamp, msg.caption);
+        broadcast(msg);
+    }
+
+    function blobToDataUrl(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(reader.error || new Error("Could not read image clipboard data."));
+            reader.readAsDataURL(blob);
+        });
+    }
+
     function linkify(text) {
         // Escape HTML to prevent XSS before adding our own <a> tags
         const div = document.createElement("div");
@@ -474,6 +570,39 @@
 
         const urlPattern = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
         return escapedText.replace(urlPattern, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+    }
+
+    function normalizeChatImageUrl(text) {
+        const value = String(text || "").trim();
+        if (!value || /\s/.test(value)) return null;
+        const url = safeHttpUrl(value);
+        if (!url) return null;
+        if (!isLikelyImageUrl(url)) return null;
+        return url.toString();
+    }
+
+    function safeChatImageSource(src) {
+        const value = String(src || "").trim();
+        if (!value) return null;
+        if (value.startsWith("data:image/")) return value;
+        const url = safeHttpUrl(value);
+        if (!url) return null;
+        if (!isLikelyImageUrl(url)) return null;
+        return url.toString();
+    }
+
+    function safeHttpUrl(value) {
+        try {
+            const url = new URL(value, window.location.href);
+            if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+            return url;
+        } catch {
+            return null;
+        }
+    }
+
+    function isLikelyImageUrl(url) {
+        return /\.(png|jpe?g|gif|webp|bmp|avif|svg)(?:[?#].*)?$/i.test(url.pathname);
     }
 
     function addFileMessage(peerId, name, size, data, timestamp) {
@@ -877,6 +1006,20 @@
         }
 
         renderEmojiAutocomplete(matches, lastColonIndex);
+    }
+
+    function handleChatPaste(event) {
+        const clipboardItems = [...(event.clipboardData && event.clipboardData.items ? event.clipboardData.items : [])];
+        const imageItem = clipboardItems.find((item) => item.kind === "file" && item.type && item.type.startsWith("image/"));
+        if (!imageItem) return;
+
+        const file = imageItem.getAsFile();
+        if (!file) return;
+
+        event.preventDefault();
+        sendClipboardImage(file).catch((error) => {
+            setStatus(`Clipboard image error: ${error.message}`);
+        });
     }
 
     function renderEmojiAutocomplete(matches, index) {
@@ -3218,6 +3361,7 @@
         });
 
         els.chatInput.addEventListener("input", handleChatInput);
+        els.chatInput.addEventListener("paste", handleChatPaste);
 
         document.addEventListener("pointerdown", (event) => {
             if (!event.target.closest(".autocomplete-wrapper")) {
