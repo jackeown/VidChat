@@ -2172,6 +2172,7 @@
                 }
                 updateRemotePlaybackPrompt(video);
             }
+            updateVideoIndicator(id);
             updateMuteIndicator(id);
         }
 
@@ -2212,7 +2213,7 @@
         const tile = fragment.querySelector(".video-tile");
         const video = fragment.querySelector("video");
         const title = fragment.querySelector(".tile-title");
-        const screenVideoIcon = fragment.querySelector(".screen-video-icon");
+        const videoStateIcon = fragment.querySelector(".video-state-icon");
         const muteIcon = fragment.querySelector(".mute-icon");
         const settingsButton = fragment.querySelector(".tile-settings-button");
         const resizeHandle = document.createElement("span");
@@ -2307,12 +2308,12 @@
         state.tileConfigs.set(config.id, config);
         ensureVideoPlayback(video);
         if (muteForAutoplay) unlockRemoteAudio();
-        if (screenVideoIcon) {
-            screenVideoIcon.disabled = true;
-            screenVideoIcon.textContent = "📹";
+        if (videoStateIcon) {
+            videoStateIcon.textContent = "🚫 Video off";
         }
         updateMuteIndicator(config.id);
         updateLocalTileState(config.id);
+        updateVideoIndicator(config.id);
         updateLocalMediaPrompt(config);
         if (oldFrame && oldFrame.placed) {
             setTileFrame(tile, oldFrame.x, oldFrame.y, oldFrame.width, oldFrame.height);
@@ -2389,7 +2390,7 @@
         if (!tile || !config || !config.local) return;
 
         tile.classList.toggle("video-muted", !config.stream.getVideoTracks().some((track) => track.enabled));
-        updateScreenVideoIndicator(id);
+        updateVideoIndicator(id);
         updateMuteIndicator(id);
         updateLocalMediaPrompt(config);
     }
@@ -2480,22 +2481,22 @@
             : "Remote audio muted";
     }
 
-    function updateScreenVideoIndicator(id) {
+    function updateVideoIndicator(id) {
         const tile = state.tiles.get(id);
         const config = state.tileConfigs.get(id);
-        if (!tile || !config || !config.local || config.kind !== "screen") return;
+        if (!tile || !config) return;
 
-        const screenVideoIcon = tile.querySelector(".screen-video-icon");
-        if (!screenVideoIcon) return;
+        const videoStateIcon = tile.querySelector(".video-state-icon");
+        if (!videoStateIcon) return;
 
         const videoTracks = config.stream.getVideoTracks();
         const videoOn = videoTracks.some((track) => track.enabled && track.readyState === "live");
         const hidden = videoTracks.length > 0 && !videoOn;
 
         tile.classList.toggle("video-muted", hidden);
-        screenVideoIcon.classList.toggle("hidden", !hidden);
-        screenVideoIcon.title = hidden ? "Screen video hidden" : "Screen video shared";
-        screenVideoIcon.setAttribute("aria-label", screenVideoIcon.title);
+        videoStateIcon.classList.toggle("hidden", !hidden);
+        videoStateIcon.title = hidden ? "Video hidden" : "Video shared";
+        videoStateIcon.setAttribute("aria-label", videoStateIcon.title);
     }
 
     function shouldShowCameraSwitchControl() {

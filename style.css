@@ -414,7 +414,7 @@ button.danger {
 
 .tile-chip,
 .tile-settings-button,
-.screen-video-icon,
+.video-state-icon,
 .mute-icon,
 .camera-switch-button,
 .fullscreen-self-view-switch {
@@ -452,15 +452,24 @@ button.danger {
     padding: 0 10px;
 }
 
-.screen-video-icon {
-    left: 56px;
+.video-state-icon {
+    left: 10px;
     top: 10px;
-    min-width: 38px;
     min-height: 34px;
-    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 0 0 8px 0;
+    background: linear-gradient(90deg, rgba(6, 8, 10, 0.74), rgba(6, 8, 10, 0.42));
+    color: #fff;
+    font-size: 0.76rem;
+    font-weight: 700;
+    pointer-events: none;
 }
 
-.screen-video-icon.hidden {
+.video-state-icon.hidden {
     display: none;
 }
 
