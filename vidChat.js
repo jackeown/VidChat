@@ -106,8 +106,8 @@
         forwardingRelayTargets: new Map(),
         forwardingTasks: new Map(),
         forwardedOutboundCalls: new Map(),
+        forwardingHandoffTimers: new Map(),
         receivedStreams: new Map(),
-        receivedStreamMeta: new Map(),
         zIndex: 1,
         unreadCount: 0,
         chatOpen: false,
@@ -317,7 +317,6 @@
             }
 
             sendLocalStreamsTo(conn.peer);
-            rebalanceStreamForwarding(true);
             publishLocalStreamManifest(true);
             updatePeerStatus();
         });
@@ -1587,6 +1586,7 @@
         for (const [key, call] of state.outboundCalls) {
             if (key.startsWith(`${kind}:`)) {
                 clearMediaCallRetry(key);
+                clearForwardingHandoffTimer(key);
                 call.close();
                 state.outboundCalls.delete(key);
             }
@@ -1649,7 +1649,7 @@
         const timer = window.setTimeout(() => {
             state.callRetryTimers.delete(key);
             if (state.localStreams.get(kind) === stream && state.dataConnections.has(peerId)) {
-                callPeer(peerId, kind, stream, attempt);
+                routeLocalStream(kind, stream, true);
             }
         }, delay);
         state.callRetryTimers.set(key, timer);
@@ -1679,16 +1679,39 @@
             if (peerId === roomPeerId || peerId === state.peer.id || !conn.open) continue;
             const key = `${kind}:${peerId}`;
             if (directTargets.has(peerId)) {
+                clearForwardingHandoffTimer(key);
                 if (force || !state.outboundCalls.has(key)) callPeer(peerId, kind, stream);
             } else if (state.outboundCalls.has(key)) {
-                const call = state.outboundCalls.get(key);
-                clearMediaCallRetry(key);
-                call.close();
-                state.outboundCalls.delete(key);
+                scheduleForwardingHandoffClose(kind, peerId);
             }
         }
 
         publishForwardingAssignments(kind, assignmentsByRelay);
+    }
+
+    function scheduleForwardingHandoffClose(kind, peerId) {
+        const key = `${kind}:${peerId}`;
+        if (state.forwardingHandoffTimers.has(key)) return;
+
+        const timer = window.setTimeout(() => {
+            state.forwardingHandoffTimers.delete(key);
+            const stream = state.localStreams.get(kind);
+            if (!stream) return;
+            const routes = forwardingRoutesForRecipients(currentMediaRecipients());
+            if (new Set(routes.directTargets).has(peerId)) return;
+            const call = state.outboundCalls.get(key);
+            if (!call) return;
+            clearMediaCallRetry(key);
+            call.close();
+            state.outboundCalls.delete(key);
+        }, 2000);
+        state.forwardingHandoffTimers.set(key, timer);
+    }
+
+    function clearForwardingHandoffTimer(key) {
+        const timer = state.forwardingHandoffTimers.get(key);
+        if (timer) window.clearTimeout(timer);
+        state.forwardingHandoffTimers.delete(key);
     }
 
     function currentMediaRecipients() {
@@ -1783,8 +1806,11 @@
 
     function rememberReceivedStream(sourcePeerId, kind, stream, metadata) {
         const key = forwardingTaskKey(sourcePeerId, kind);
+        const previousStream = state.receivedStreams.get(key);
+        if (previousStream && previousStream !== stream) {
+            closeStaleForwardedCalls(sourcePeerId, kind, new Set());
+        }
         state.receivedStreams.set(key, stream);
-        state.receivedStreamMeta.set(key, metadata || {});
     }
 
     function updateForwardingTask(sourcePeerId, kind) {
@@ -1847,7 +1873,6 @@
         const key = forwardingTaskKey(sourcePeerId, kind);
         state.forwardingTasks.delete(key);
         state.receivedStreams.delete(key);
-        state.receivedStreamMeta.delete(key);
         closeStaleForwardedCalls(sourcePeerId, kind, new Set());
     }
 
@@ -1961,7 +1986,6 @@
         requestMissingExpectedStreams();
         repairDeadConnections();
         ensureLocalStreamsAreShared();
-        rebalanceStreamForwarding();
         applyQualityPolicies();
         refreshMediaElements();
     }
@@ -1982,13 +2006,11 @@
         reconnectKnownPeers();
         repairDeadConnections();
         ensureLocalStreamsAreShared(true);
-        rebalanceStreamForwarding(true);
         applyQualityPolicies(true);
         window.setTimeout(() => {
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
-            rebalanceStreamForwarding(true);
             repairDeadConnections();
             applyQualityPolicies(true);
         }, 1800);
@@ -1996,7 +2018,6 @@
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
-            rebalanceStreamForwarding(true);
             repairDeadConnections();
             applyQualityPolicies(true);
         }, 4500);
@@ -2305,8 +2326,13 @@
 
         for (const [key, call] of [...state.outboundCalls]) {
             clearMediaCallRetry(key);
+            clearForwardingHandoffTimer(key);
             call.close();
             state.outboundCalls.delete(key);
+        }
+
+        for (const key of [...state.forwardingHandoffTimers.keys()]) {
+            clearForwardingHandoffTimer(key);
         }
 
         for (const [key, call] of [...state.forwardedOutboundCalls]) {
@@ -2316,7 +2342,6 @@
         state.forwardingRelayTargets.clear();
         state.forwardingTasks.clear();
         state.receivedStreams.clear();
-        state.receivedStreamMeta.clear();
 
         for (const [key, call] of [...state.inboundCalls]) {
             call.close();
@@ -3667,6 +3692,7 @@
         for (const [key, call] of state.outboundCalls) {
             if (key.endsWith(`:${peerId}`)) {
                 clearMediaCallRetry(key);
+                clearForwardingHandoffTimer(key);
                 call.close();
                 state.outboundCalls.delete(key);
             }
