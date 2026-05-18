@@ -45,6 +45,8 @@
     };
     const qualityRank = new Map(qualityLevels.map((quality, index) => [quality, index]));
     const connectionStaleLimitMs = 10000;
+    const forwardingDirectFanout = 4;
+    const forwardingRelayFanout = 4;
 
     const qs = new URLSearchParams(window.location.search);
     const roomId = sanitizeRoomId(qs.get("room")) || createRoomId();
@@ -85,6 +87,7 @@
         layout: "grid",
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
+        streamForwardingEnabled: localStorage.getItem("vidChatStreamForwarding") !== "false",
         cameraFacingMode: localStorage.getItem("vidChatCameraFacingMode") || "",
         cameraSendQuality: localStorage.getItem("vidChatCameraQuality") || "auto",
         screenSendQuality: localStorage.getItem("vidChatScreenQuality") || "auto",
@@ -99,6 +102,12 @@
         remoteQualityPreferences: new Map(),
         remoteQualityCaps: new Map(),
         appliedQualityTargets: new Map(),
+        forwardingPeerCaps: new Map(),
+        forwardingRelayTargets: new Map(),
+        forwardingTasks: new Map(),
+        forwardedOutboundCalls: new Map(),
+        receivedStreams: new Map(),
+        receivedStreamMeta: new Map(),
         zIndex: 1,
         unreadCount: 0,
         chatOpen: false,
@@ -172,6 +181,7 @@
         clearBgImage: document.getElementById("clearBgImage"),
         accentColorInput: document.getElementById("accentColorInput"),
         mirrorLocalCamera: document.getElementById("mirrorLocalCamera"),
+        streamForwardingEnabled: document.getElementById("streamForwardingEnabled"),
         feedModal: document.getElementById("feedModal"),
         feedModalTitle: document.getElementById("feedModalTitle"),
         feedModalSubtitle: document.getElementById("feedModalSubtitle"),
@@ -262,7 +272,8 @@
 
     function handleIncomingCall(call) {
         const kind = call.metadata && call.metadata.kind ? call.metadata.kind : "camera";
-        const key = `${kind}:${call.peer}`;
+        const sourcePeerId = call.metadata && call.metadata.sourcePeerId ? call.metadata.sourcePeerId : call.peer;
+        const key = `${kind}:${sourcePeerId}`;
         const oldCall = state.inboundCalls.get(key);
         state.inboundCalls.set(key, call);
         if (oldCall && oldCall !== call) oldCall.close();
@@ -270,7 +281,9 @@
         call.answer();
         call.on("stream", (stream) => {
             if (state.inboundCalls.get(key) !== call) return;
-            addRemoteStream(call.peer, call.metadata, stream);
+            addRemoteStream(sourcePeerId, call.metadata, stream);
+            rememberReceivedStream(sourcePeerId, kind, stream, call.metadata);
+            updateForwardingTask(sourcePeerId, kind);
         });
         call.on("close", () => clearIncomingCall(key, call));
         call.on("error", () => clearIncomingCall(key, call));
@@ -294,7 +307,7 @@
             clearDataConnectionRetry(conn.peer);
             markPeerSeen(conn.peer);
             rememberPeer(conn.peer);
-            conn.send({ type: "hello", peerId: state.peer.id, displayName: state.displayName });
+            conn.send({ type: "hello", peerId: state.peer.id, displayName: state.displayName, streamForwardingEnabled: state.streamForwardingEnabled });
             sendStreamManifestTo(conn.peer);
 
             if (state.isHost && coordinatorConnection) {
@@ -304,6 +317,7 @@
             }
 
             sendLocalStreamsTo(conn.peer);
+            rebalanceStreamForwarding(true);
             publishLocalStreamManifest(true);
             updatePeerStatus();
         });
@@ -347,6 +361,9 @@
         if (message.displayName) {
             setPeerName(peerId, message.displayName);
         }
+        if (typeof message.streamForwardingEnabled === "boolean") {
+            state.forwardingPeerCaps.set(peerId, message.streamForwardingEnabled);
+        }
 
         if (message.type === "hello") {
             return;
@@ -373,6 +390,16 @@
 
         if (message.type === "quality-preference") {
             handleQualityPreference(peerId, message);
+            return;
+        }
+
+        if (message.type === "forwarding-capability") {
+            rebalanceStreamForwarding(true);
+            return;
+        }
+
+        if (message.type === "forwarding-assignment") {
+            handleForwardingAssignment(peerId, message);
             return;
         }
 
@@ -418,6 +445,7 @@
         if (message.type === "peer-left") {
             forgetPeer(message.peerId);
             clearDataConnectionRetry(message.peerId);
+            closeCallsForPeer(message.peerId);
             removePeerTiles(message.peerId);
             updatePeerStatus();
             return;
@@ -425,6 +453,7 @@
 
         if (message.type === "stream-stopped") {
             forgetExpectedRemoteStream(peerId, message.kind);
+            clearForwardingTask(peerId, message.kind);
             removeTile(tileId(peerId, message.kind));
             return;
         }
@@ -1565,18 +1594,15 @@
     }
 
     function sendLocalStreamToAll(kind, stream) {
-        for (const peerId of state.dataConnections.keys()) {
-            callPeer(peerId, kind, stream);
-        }
+        routeLocalStream(kind, stream, true);
     }
 
     function sendLocalStreamsTo(peerId) {
-        for (const [kind, stream] of state.localStreams) {
-            callPeer(peerId, kind, stream);
-        }
+        if (!peerId || peerId === roomPeerId) return;
+        rebalanceStreamForwarding(true);
     }
 
-    function callPeer(peerId, kind, stream, attempt = 0) {
+    function callPeer(peerId, kind, stream, attempt = 0, metadataOverrides = {}) {
         if (!state.peer || peerId === state.peer.id) return;
 
         const key = `${kind}:${peerId}`;
@@ -1592,7 +1618,10 @@
                 kind,
                 from: state.peer.id,
                 displayName: state.displayName,
-                hasAudio: stream.getAudioTracks().length > 0
+                sourcePeerId: state.peer.id,
+                sourceDisplayName: state.displayName,
+                hasAudio: stream.getAudioTracks().length > 0,
+                ...metadataOverrides
             }
         });
 
@@ -1632,6 +1661,255 @@
         state.callRetryTimers.delete(key);
     }
 
+    function rebalanceStreamForwarding(force = false) {
+        for (const [kind, stream] of state.localStreams) {
+            routeLocalStream(kind, stream, force);
+        }
+    }
+
+    function routeLocalStream(kind, stream, force = false) {
+        if (!stream || !state.peer) return;
+
+        const recipients = currentMediaRecipients();
+        const routes = forwardingRoutesForRecipients(recipients);
+        const directTargets = new Set(routes.directTargets);
+        const assignmentsByRelay = routes.assignmentsByRelay;
+
+        for (const [peerId, conn] of state.dataConnections) {
+            if (peerId === roomPeerId || peerId === state.peer.id || !conn.open) continue;
+            const key = `${kind}:${peerId}`;
+            if (directTargets.has(peerId)) {
+                if (force || !state.outboundCalls.has(key)) callPeer(peerId, kind, stream);
+            } else if (state.outboundCalls.has(key)) {
+                const call = state.outboundCalls.get(key);
+                clearMediaCallRetry(key);
+                call.close();
+                state.outboundCalls.delete(key);
+            }
+        }
+
+        publishForwardingAssignments(kind, assignmentsByRelay);
+    }
+
+    function currentMediaRecipients() {
+        return [...state.dataConnections.keys()]
+            .filter((peerId) => peerId !== roomPeerId && peerId !== (state.peer && state.peer.id))
+            .filter((peerId) => !state.abandonedPeers.has(peerId))
+            .filter((peerId) => {
+                const conn = state.dataConnections.get(peerId);
+                return conn && conn.open;
+            })
+            .sort();
+    }
+
+    function forwardingRoutesForRecipients(recipients) {
+        if (!state.streamForwardingEnabled || recipients.length <= forwardingDirectFanout) {
+            return { directTargets: recipients, assignmentsByRelay: new Map() };
+        }
+
+        const relayCandidates = recipients.filter((peerId) => state.forwardingPeerCaps.get(peerId) !== false);
+        const relayCount = Math.min(
+            relayCandidates.length,
+            forwardingDirectFanout,
+            Math.max(1, Math.ceil((recipients.length - forwardingDirectFanout) / forwardingRelayFanout))
+        );
+        const relayPeers = relayCandidates.slice(0, relayCount);
+        if (!relayPeers.length) return { directTargets: recipients, assignmentsByRelay: new Map() };
+
+        const directTargets = new Set(relayPeers);
+        for (const peerId of recipients) {
+            if (directTargets.size >= forwardingDirectFanout) break;
+            directTargets.add(peerId);
+        }
+
+        const overflow = recipients.filter((peerId) => !directTargets.has(peerId));
+        const assignmentsByRelay = new Map(relayPeers.map((peerId) => [peerId, new Set()]));
+        overflow.forEach((targetPeerId, index) => {
+            const relayPeerId = relayPeers[index % relayPeers.length];
+            if (relayPeerId !== targetPeerId) assignmentsByRelay.get(relayPeerId).add(targetPeerId);
+        });
+
+        return { directTargets: [...directTargets], assignmentsByRelay };
+    }
+
+    function publishForwardingAssignments(kind, assignmentsByRelay) {
+        const currentRelays = new Set(assignmentsByRelay.keys());
+        const previousRelays = state.forwardingRelayTargets.get(kind) || new Set();
+
+        for (const relayPeerId of previousRelays) {
+            if (!currentRelays.has(relayPeerId)) {
+                sendForwardingAssignment(kind, relayPeerId, []);
+            }
+        }
+
+        for (const [relayPeerId, targets] of assignmentsByRelay) {
+            sendForwardingAssignment(kind, relayPeerId, [...targets]);
+        }
+
+        state.forwardingRelayTargets.set(kind, currentRelays);
+    }
+
+    function sendForwardingAssignment(kind, relayPeerId, targets) {
+        sendToPeer(relayPeerId, {
+            type: "forwarding-assignment",
+            sourcePeerId: state.peer && state.peer.id,
+            sourceDisplayName: state.displayName,
+            kind,
+            targets,
+            streamForwardingEnabled: state.streamForwardingEnabled
+        });
+    }
+
+    function handleForwardingAssignment(fromPeerId, message) {
+        if (!state.streamForwardingEnabled || !message || message.sourcePeerId !== fromPeerId || !message.kind) return;
+        const targets = Array.isArray(message.targets)
+            ? message.targets.filter((peerId) => peerId && peerId !== state.peer.id && peerId !== fromPeerId && peerId !== roomPeerId)
+            : [];
+        const key = forwardingTaskKey(fromPeerId, message.kind);
+
+        if (!targets.length) {
+            clearForwardingTask(fromPeerId, message.kind);
+            return;
+        }
+
+        state.forwardingTasks.set(key, {
+            sourcePeerId: fromPeerId,
+            sourceDisplayName: sanitizeDisplayName(message.sourceDisplayName) || state.peerNames.get(fromPeerId) || shortPeer(fromPeerId),
+            kind: message.kind,
+            targets: new Set(targets)
+        });
+        updateForwardingTask(fromPeerId, message.kind);
+    }
+
+    function rememberReceivedStream(sourcePeerId, kind, stream, metadata) {
+        const key = forwardingTaskKey(sourcePeerId, kind);
+        state.receivedStreams.set(key, stream);
+        state.receivedStreamMeta.set(key, metadata || {});
+    }
+
+    function updateForwardingTask(sourcePeerId, kind) {
+        const key = forwardingTaskKey(sourcePeerId, kind);
+        const task = state.forwardingTasks.get(key);
+        const stream = state.receivedStreams.get(key);
+        if (!task || !stream || !state.streamForwardingEnabled) return;
+
+        const activeTargets = new Set();
+        for (const targetPeerId of task.targets) {
+            const conn = state.dataConnections.get(targetPeerId);
+            if (!conn || !conn.open || state.abandonedPeers.has(targetPeerId)) continue;
+            activeTargets.add(targetPeerId);
+            forwardStreamToPeer(task, stream, targetPeerId);
+        }
+
+        closeStaleForwardedCalls(sourcePeerId, kind, activeTargets);
+    }
+
+    function forwardStreamToPeer(task, stream, targetPeerId) {
+        if (!state.peer || targetPeerId === state.peer.id || targetPeerId === task.sourcePeerId) return;
+
+        const key = forwardedCallKey(task.sourcePeerId, task.kind, targetPeerId);
+        const oldCall = state.forwardedOutboundCalls.get(key);
+        if (oldCall) return;
+
+        const call = state.peer.call(targetPeerId, stream, {
+            metadata: {
+                kind: task.kind,
+                from: task.sourcePeerId,
+                sourcePeerId: task.sourcePeerId,
+                sourceDisplayName: task.sourceDisplayName,
+                displayName: task.sourceDisplayName,
+                relayPeerId: state.peer.id,
+                relayed: true,
+                hasAudio: stream.getAudioTracks().length > 0
+            }
+        });
+
+        state.forwardedOutboundCalls.set(key, call);
+        call.on("close", () => {
+            if (state.forwardedOutboundCalls.get(key) === call) state.forwardedOutboundCalls.delete(key);
+        });
+        call.on("error", () => {
+            if (state.forwardedOutboundCalls.get(key) === call) state.forwardedOutboundCalls.delete(key);
+        });
+    }
+
+    function closeStaleForwardedCalls(sourcePeerId, kind, activeTargets) {
+        for (const [key, call] of [...state.forwardedOutboundCalls]) {
+            const parts = splitForwardedCallKey(key);
+            if (!parts || parts.sourcePeerId !== sourcePeerId || parts.kind !== kind) continue;
+            if (activeTargets.has(parts.targetPeerId)) continue;
+            call.close();
+            state.forwardedOutboundCalls.delete(key);
+        }
+    }
+
+    function clearForwardingTask(sourcePeerId, kind) {
+        const key = forwardingTaskKey(sourcePeerId, kind);
+        state.forwardingTasks.delete(key);
+        state.receivedStreams.delete(key);
+        state.receivedStreamMeta.delete(key);
+        closeStaleForwardedCalls(sourcePeerId, kind, new Set());
+    }
+
+    function clearForwardingStateForPeer(peerId) {
+        for (const key of [...state.forwardingTasks.keys()]) {
+            const [sourcePeerId, kind] = splitForwardingTaskKey(key);
+            if (sourcePeerId === peerId) clearForwardingTask(sourcePeerId, kind);
+        }
+        for (const key of [...state.receivedStreams.keys()]) {
+            const [sourcePeerId, kind] = splitForwardingTaskKey(key);
+            if (sourcePeerId === peerId) clearForwardingTask(sourcePeerId, kind);
+        }
+        for (const [key, call] of [...state.forwardedOutboundCalls]) {
+            const parts = splitForwardedCallKey(key);
+            if (!parts || parts.sourcePeerId !== peerId && parts.targetPeerId !== peerId) continue;
+            call.close();
+            state.forwardedOutboundCalls.delete(key);
+        }
+        for (const [kind, relays] of state.forwardingRelayTargets) {
+            if (!relays.delete(peerId)) continue;
+            state.forwardingRelayTargets.set(kind, relays);
+        }
+    }
+
+    function clearAllForwardingTasks() {
+        for (const key of [...state.forwardingTasks.keys()]) {
+            const [sourcePeerId, kind] = splitForwardingTaskKey(key);
+            clearForwardingTask(sourcePeerId, kind);
+        }
+        for (const [key, call] of [...state.forwardedOutboundCalls]) {
+            call.close();
+            state.forwardedOutboundCalls.delete(key);
+        }
+        for (const kind of [...state.forwardingRelayTargets.keys()]) {
+            publishForwardingAssignments(kind, new Map());
+        }
+        state.forwardingRelayTargets.clear();
+    }
+
+    function forwardingTaskKey(sourcePeerId, kind) {
+        return `${sourcePeerId}:${kind}`;
+    }
+
+    function splitForwardingTaskKey(key) {
+        const separator = key.lastIndexOf(":");
+        return [key.slice(0, separator), key.slice(separator + 1)];
+    }
+
+    function forwardedCallKey(sourcePeerId, kind, targetPeerId) {
+        return `${sourcePeerId}:${kind}:${targetPeerId}`;
+    }
+
+    function splitForwardedCallKey(key) {
+        const parts = key.split(":");
+        if (parts.length < 3) return null;
+        return {
+            sourcePeerId: parts[0],
+            kind: parts[1],
+            targetPeerId: parts.slice(2).join(":")
+        };
+    }
+
     function rememberPeer(peerId) {
         if (!peerId || peerId === roomPeerId || peerId === (state.peer && state.peer.id)) return;
         state.knownPeers.add(peerId);
@@ -1645,6 +1923,8 @@
         state.abandonedPeers.delete(peerId);
         state.connectionFailureCounts.delete(peerId);
         state.expectedRemoteStreams.delete(peerId);
+        state.forwardingPeerCaps.delete(peerId);
+        clearForwardingStateForPeer(peerId);
         clearPeerQualityState(peerId);
         clearMissingStreamRequestsForPeer(peerId);
     }
@@ -1681,6 +1961,7 @@
         requestMissingExpectedStreams();
         repairDeadConnections();
         ensureLocalStreamsAreShared();
+        rebalanceStreamForwarding();
         applyQualityPolicies();
         refreshMediaElements();
     }
@@ -1701,11 +1982,13 @@
         reconnectKnownPeers();
         repairDeadConnections();
         ensureLocalStreamsAreShared(true);
+        rebalanceStreamForwarding(true);
         applyQualityPolicies(true);
         window.setTimeout(() => {
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
+            rebalanceStreamForwarding(true);
             repairDeadConnections();
             applyQualityPolicies(true);
         }, 1800);
@@ -1713,6 +1996,7 @@
             ensureRoomCoordinatorReachable();
             reconnectKnownPeers();
             ensureLocalStreamsAreShared(true);
+            rebalanceStreamForwarding(true);
             repairDeadConnections();
             applyQualityPolicies(true);
         }, 4500);
@@ -1763,7 +2047,7 @@
         const peers = currentPeerList();
         for (const [peerId, conn] of state.dataConnections) {
             if (!conn.open) continue;
-            conn.send({ type: "peer-sync", peers, timestamp: now });
+            conn.send({ type: "peer-sync", peers, timestamp: now, streamForwardingEnabled: state.streamForwardingEnabled });
         }
     }
 
@@ -2025,6 +2309,15 @@
             state.outboundCalls.delete(key);
         }
 
+        for (const [key, call] of [...state.forwardedOutboundCalls]) {
+            call.close();
+            state.forwardedOutboundCalls.delete(key);
+        }
+        state.forwardingRelayTargets.clear();
+        state.forwardingTasks.clear();
+        state.receivedStreams.clear();
+        state.receivedStreamMeta.clear();
+
         for (const [key, call] of [...state.inboundCalls]) {
             call.close();
             state.inboundCalls.delete(key);
@@ -2107,7 +2400,15 @@
             call.close();
             const [kind, peerId] = splitCallKey(key);
             const stream = state.localStreams.get(kind);
-            if (stream && state.dataConnections.has(peerId)) callPeer(peerId, kind, stream);
+            if (stream && state.dataConnections.has(peerId)) routeLocalStream(kind, stream, true);
+        }
+
+        for (const [key, call] of [...state.forwardedOutboundCalls]) {
+            if (!isPeerConnectionDead(findPeerConnection(call))) continue;
+            state.forwardedOutboundCalls.delete(key);
+            call.close();
+            const parts = splitForwardedCallKey(key);
+            if (parts) updateForwardingTask(parts.sourcePeerId, parts.kind);
         }
 
         for (const [key, call] of [...state.inboundCalls]) {
@@ -2144,13 +2445,7 @@
         for (const [kind, stream] of state.localStreams) {
             const hasLiveTrack = stream.getTracks().some((track) => track.enabled && track.readyState === "live");
             if (!hasLiveTrack) continue;
-
-            for (const [peerId, conn] of state.dataConnections) {
-                if (state.abandonedPeers.has(peerId)) continue;
-                if (!conn.open || peerId === state.peer.id) continue;
-                const key = `${kind}:${peerId}`;
-                if (force || !state.outboundCalls.has(key)) callPeer(peerId, kind, stream);
-            }
+            routeLocalStream(kind, stream, force);
         }
     }
 
@@ -3378,11 +3673,13 @@
         }
 
         for (const [key, call] of state.inboundCalls) {
-            if (key.endsWith(`:${peerId}`)) {
+            if (key.endsWith(`:${peerId}`) || call.peer === peerId) {
                 call.close();
                 state.inboundCalls.delete(key);
             }
         }
+
+        clearForwardingStateForPeer(peerId);
     }
 
     function splitCallKey(key) {
@@ -3439,6 +3736,12 @@
         for (const [key, call] of state.outboundCalls) {
             const [kind, peerId] = splitCallKey(key);
             add(`${capitalize(kind)} sent`, peerId, kind, "outbound", call);
+        }
+
+        for (const [key, call] of state.forwardedOutboundCalls) {
+            const parts = splitForwardedCallKey(key);
+            if (!parts) continue;
+            add(`${capitalize(parts.kind)} forwarded`, parts.targetPeerId, parts.kind, "outbound relay", call);
         }
 
         for (const [key, call] of state.inboundCalls) {
@@ -3777,6 +4080,16 @@
             state.mirrorLocalCamera = els.mirrorLocalCamera.checked;
             localStorage.setItem("vidChatMirrorLocalCamera", String(state.mirrorLocalCamera));
             applyMirrorSetting();
+        });
+        els.streamForwardingEnabled.checked = state.streamForwardingEnabled;
+        els.streamForwardingEnabled.addEventListener("change", () => {
+            state.streamForwardingEnabled = els.streamForwardingEnabled.checked;
+            localStorage.setItem("vidChatStreamForwarding", String(state.streamForwardingEnabled));
+            broadcast({ type: "forwarding-capability", streamForwardingEnabled: state.streamForwardingEnabled });
+            if (!state.streamForwardingEnabled) {
+                clearAllForwardingTasks();
+            }
+            rebalanceStreamForwarding(true);
         });
         document.querySelectorAll("input[name='videoFit']").forEach((input) => {
             input.checked = input.value === state.videoFit;
