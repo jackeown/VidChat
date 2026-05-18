@@ -1384,17 +1384,15 @@
             return;
         }
 
-        const tracks = stream.getVideoTracks();
-        const audioTracks = stream.getAudioTracks();
         const screenRow = document.createElement("div");
         screenRow.className = "setting-row";
         const screenLabel = document.createElement("span");
         const screenValue = document.createElement("span");
         screenLabel.textContent = "Current screen";
-        screenValue.textContent = `${tracks.length ? "Active" : "Inactive"}${audioTracks.length ? " with audio" : ""}`;
+        screenValue.textContent = screenSubtitle(stream);
         screenRow.append(screenLabel, screenValue);
 
-        els.screenShareModalSubtitle.textContent = "Choose another screen or stop the current share.";
+        els.screenShareModalSubtitle.textContent = "Choose another screen, mute the screen video, or stop sharing.";
         els.screenShareModalControls.appendChild(screenRow);
         els.screenShareModalControls.appendChild(makeModalButton("Share another screen", () => startScreenShare(true), "primary"));
         els.screenShareModalControls.appendChild(makeModalButton("Stop sharing", () => {
@@ -2397,7 +2395,9 @@
         if (!tile || !overlay) return;
 
         const videoTracks = config.stream.getVideoTracks();
+        const audioTracks = config.stream.getAudioTracks();
         const liveVideo = videoTracks.some((track) => track.enabled && track.readyState === "live");
+        const liveAudio = audioTracks.some((track) => track.enabled && track.readyState === "live");
         const endedVideo = videoTracks.length > 0 && !videoTracks.some((track) => track.readyState === "live");
         const video = tile.querySelector("video");
         const shouldRender = config.kind === "camera" || config.kind === "screen";
@@ -2406,9 +2406,15 @@
         let message = "";
 
         if (!videoTracks.length) {
-            message = config.kind === "screen" ? "Tap to reshare screen" : "Tap to share camera";
+            if (config.kind === "screen" && liveAudio) {
+                message = "Screen video is off. Audio is still shared.";
+            } else {
+                message = config.kind === "screen" ? "Tap to reshare screen" : "Tap to share camera";
+            }
         } else if (endedVideo) {
             message = config.kind === "screen" ? "Screen share stopped. Tap to reshare." : "Camera stopped. Tap to restart.";
+        } else if (config.kind === "screen" && !liveVideo && liveAudio) {
+            message = "Screen video is muted. Audio is still shared.";
         } else if (liveVideo && shouldRender && !rendering && !stillStarting) {
             message = config.kind === "screen" ? "Screen looks stuck. Tap to reshare." : "Camera looks stuck. Tap to restart.";
         }
@@ -2425,15 +2431,15 @@
         const audioOn = audioTracks.some((track) => track.enabled);
 
         if (kind === "screen") {
-            videoButton.textContent = videoTracks.length === 0 ? "Share screen" : "Stop sharing";
+            videoButton.textContent = videoTracks.length === 0 ? "No screen video" : (videoOn ? "Mute screen video" : "Show screen video");
         } else {
             videoButton.textContent = videoTracks.length === 0 ? "No video" : (videoOn ? "Mute video" : "Show video");
         }
         audioButton.textContent = audioTracks.length === 0 ? "No audio" : kind === "screen" ? (audioOn ? "Mute audio" : "Unmute audio") : (audioOn ? "Mute mic" : "Unmute mic");
 
-        videoButton.classList.toggle("danger", kind === "screen" ? videoTracks.length > 0 : videoOn);
+        videoButton.classList.toggle("danger", videoOn);
         audioButton.classList.toggle("danger", audioOn);
-        videoButton.disabled = kind === "screen" ? false : videoTracks.length === 0;
+        videoButton.disabled = videoTracks.length === 0;
         audioButton.disabled = audioTracks.length === 0;
         updateLocalTileState(config.id);
 
@@ -2483,11 +2489,7 @@
         }
 
         if (kind === "screen") {
-            if (!hasAudio) return videoOn ? "Screen shared without audio" : "Screen hidden, no audio";
-            if (!videoOn && !audioOn) return "Screen and audio muted";
-            if (!videoOn) return "Screen hidden, audio shared";
-            if (!audioOn) return "Screen shared, audio muted";
-            return "Screen and audio shared";
+            return screenSubtitle(stream);
         }
 
         if (!hasVideo && !hasAudio) return "No camera or microphone";
@@ -2542,9 +2544,17 @@
             els.feedModalControls.appendChild(createSenderQualityRow(config));
 
             if (config.kind === "screen") {
-                els.feedModalControls.appendChild(makeModalButton("Manage screen sharing", () => {
-                    openScreenShareManager();
-                }));
+                const videoButton = makeModalButton("", () => {
+                    toggleTracks(config.stream.getVideoTracks());
+                    updateTrackState(config, videoButton, audioButton);
+                });
+                const audioButton = makeModalButton("", () => {
+                    toggleTracks(config.stream.getAudioTracks());
+                    updateTrackState(config, videoButton, audioButton);
+                });
+                updateTrackState(config, videoButton, audioButton);
+                els.feedModalControls.append(videoButton, audioButton);
+                els.feedModalControls.appendChild(makeModalButton("Manage screen sharing", openScreenShareManager));
                 els.feedModalControls.appendChild(makeModalButton("Stop sharing", () => {
                     stopLocalStream("screen");
                     if (els.screenShareModal.open) els.screenShareModal.close();
@@ -4012,14 +4022,16 @@
         const hasCamera = state.localStreams.has("camera") || state.previewStreams.has("camera");
         const screenOn = state.localStreams.has("screen");
         const screenStream = state.localStreams.get("screen");
+        const screenHasVideo = screenStream && screenStream.getVideoTracks().some((track) => track.enabled && track.readyState === "live");
         const hasScreenAudio = screenStream && screenStream.getAudioTracks().length > 0;
         const screenAudioMuted = hasScreenAudio && !screenStream.getAudioTracks().some(t => t.enabled);
+        const screenAudioOnly = screenOn && !screenHasVideo && hasScreenAudio && !screenAudioMuted;
 
         els.cameraToggle.disabled = false;
         els.cameraToggle.textContent = hasCamera ? "Remove Video" : "Share Camera/Mic";
         els.cameraToggle.classList.toggle("danger", hasCamera);
 
-        els.screenToggle.textContent = screenOn ? "Screen Sharing" : "Share screen";
+        els.screenToggle.textContent = screenOn ? (screenAudioOnly ? "Screen Audio Only" : "Screen Sharing") : "Share screen";
         els.screenToggle.title = screenOn ? "Manage screen sharing" : "Share screen";
         els.screenToggle.classList.toggle("danger", false);
         els.screenToggle.classList.toggle("primary", screenOn);
@@ -4104,7 +4116,18 @@
     }
 
     function screenSubtitle(stream) {
-        return stream.getAudioTracks().length ? "Screen share with audio" : "Screen share without audio";
+        const videoTracks = stream.getVideoTracks();
+        const audioTracks = stream.getAudioTracks();
+        const videoOn = videoTracks.some((track) => track.enabled && track.readyState === "live");
+        const audioOn = audioTracks.some((track) => track.enabled && track.readyState === "live");
+
+        if (!videoTracks.length) {
+            return audioOn ? "Screen video off. Audio still shared." : "Screen share stopped.";
+        }
+        if (!videoOn && audioOn) return "Screen video muted. Audio still shared.";
+        if (!videoOn && !audioOn) return "Screen and audio muted.";
+        if (videoOn && !audioOn) return "Screen video shared, audio muted.";
+        return "Screen video shared with audio.";
     }
 
     function tileId(peerId, kind) {
