@@ -2212,6 +2212,7 @@
         const tile = fragment.querySelector(".video-tile");
         const video = fragment.querySelector("video");
         const title = fragment.querySelector(".tile-title");
+        const screenVideoIcon = fragment.querySelector(".screen-video-icon");
         const muteIcon = fragment.querySelector(".mute-icon");
         const settingsButton = fragment.querySelector(".tile-settings-button");
         const resizeHandle = document.createElement("span");
@@ -2306,6 +2307,10 @@
         state.tileConfigs.set(config.id, config);
         ensureVideoPlayback(video);
         if (muteForAutoplay) unlockRemoteAudio();
+        if (screenVideoIcon) {
+            screenVideoIcon.disabled = true;
+            screenVideoIcon.textContent = "📹";
+        }
         updateMuteIndicator(config.id);
         updateLocalTileState(config.id);
         updateLocalMediaPrompt(config);
@@ -2384,6 +2389,7 @@
         if (!tile || !config || !config.local) return;
 
         tile.classList.toggle("video-muted", !config.stream.getVideoTracks().some((track) => track.enabled));
+        updateScreenVideoIndicator(id);
         updateMuteIndicator(id);
         updateLocalMediaPrompt(config);
     }
@@ -2472,6 +2478,24 @@
         muteIcon.title = config.local
             ? (config.kind === "screen" ? "Screen audio muted" : "Microphone muted")
             : "Remote audio muted";
+    }
+
+    function updateScreenVideoIndicator(id) {
+        const tile = state.tiles.get(id);
+        const config = state.tileConfigs.get(id);
+        if (!tile || !config || !config.local || config.kind !== "screen") return;
+
+        const screenVideoIcon = tile.querySelector(".screen-video-icon");
+        if (!screenVideoIcon) return;
+
+        const videoTracks = config.stream.getVideoTracks();
+        const videoOn = videoTracks.some((track) => track.enabled && track.readyState === "live");
+        const hidden = videoTracks.length > 0 && !videoOn;
+
+        tile.classList.toggle("video-muted", hidden);
+        screenVideoIcon.classList.toggle("hidden", !hidden);
+        screenVideoIcon.title = hidden ? "Screen video hidden" : "Screen video shared";
+        screenVideoIcon.setAttribute("aria-label", screenVideoIcon.title);
     }
 
     function shouldShowCameraSwitchControl() {

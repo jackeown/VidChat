@@ -414,6 +414,7 @@ button.danger {
 
 .tile-chip,
 .tile-settings-button,
+.screen-video-icon,
 .mute-icon,
 .camera-switch-button,
 .fullscreen-self-view-switch {
@@ -449,6 +450,18 @@ button.danger {
     min-width: 38px;
     min-height: 34px;
     padding: 0 10px;
+}
+
+.screen-video-icon {
+    left: 56px;
+    top: 10px;
+    min-width: 38px;
+    min-height: 34px;
+    padding: 0 10px;
+}
+
+.screen-video-icon.hidden {
+    display: none;
 }
 
 .mute-icon.hidden {
