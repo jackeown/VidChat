@@ -665,15 +665,7 @@
         contentEl.className = "content";
 
         const blob = data instanceof Blob ? data : new Blob([data]);
-        const url = URL.createObjectURL(blob);
-
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = name;
-        link.className = "file-link";
-        link.innerHTML = `<span>📁 ${name}</span> <span class="file-info">(${formatBytes(size)})</span>`;
-
-        contentEl.appendChild(link);
+        renderFileAttachment(contentEl, name, size, blob);
         messageEl.append(authorEl, contentEl);
         els.chatHistory.appendChild(messageEl);
         els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
@@ -724,7 +716,10 @@
         progress.max = size || 1;
         progress.value = 0;
 
-        contentEl.append(title, status, progress);
+        const attachment = document.createElement("div");
+        attachment.className = "file-attachment hidden";
+
+        contentEl.append(title, status, progress, attachment);
         messageEl.append(authorEl, contentEl);
         els.chatHistory.appendChild(messageEl);
         els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
@@ -738,10 +733,14 @@
             messageEl,
             status,
             progress,
+            attachment,
+            name,
+            size,
             complete(text) {
                 status.textContent = text;
                 progress.value = progress.max;
                 contentEl.classList.add("complete");
+                attachment.classList.remove("hidden");
             },
             fail(text) {
                 status.textContent = text;
@@ -897,9 +896,55 @@
         }
 
         const blob = new Blob(transfer.chunks, { type: transfer.mimeType });
+        finalizeFileTransferMessage(transfer.ui, transfer.name, transfer.size, blob, transfer.mimeType);
         transfer.ui.complete("Received. Download is ready.");
-        addFileMessage(peerId, transfer.name, transfer.size, blob, transfer.timestamp);
         sendToPeer(peerId, { type: "file-ack", transferId: message.transferId });
+    }
+
+    function finalizeFileTransferMessage(ui, name, size, blob, mimeType) {
+        if (!ui || !ui.attachment) return;
+        renderFileAttachment(ui.attachment, name, size, blob, mimeType);
+    }
+
+    function renderFileAttachment(container, name, size, blob, mimeType) {
+        if (!container) return null;
+
+        const type = mimeType || (blob && blob.type) || "";
+        const url = URL.createObjectURL(blob);
+        const isImage = type.startsWith("image/") || isLikelyImageName(name);
+
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = name;
+        link.className = "file-link";
+
+        const icon = document.createElement("span");
+        icon.textContent = "📁";
+
+        const label = document.createElement("span");
+        label.textContent = name;
+
+        const info = document.createElement("span");
+        info.className = "file-info";
+        info.textContent = `(${formatBytes(size)})`;
+
+        link.append(icon, label, info);
+        container.replaceChildren(link);
+        container.classList.remove("hidden");
+
+        if (isImage) {
+            const preview = document.createElement("img");
+            preview.className = "file-preview-image";
+            preview.alt = name;
+            preview.src = url;
+            container.appendChild(preview);
+        }
+
+        return url;
+    }
+
+    function isLikelyImageName(name) {
+        return /\.(png|jpe?g|gif|webp|bmp|avif|svg)(?:[?#].*)?$/i.test(String(name || ""));
     }
 
     async function normalizeFileChunk(data) {

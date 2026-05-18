@@ -747,6 +747,16 @@ button.danger {
     text-decoration: underline;
 }
 
+.file-attachment {
+    display: grid;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.file-attachment.hidden {
+    display: none;
+}
+
 .chat-image {
     display: grid;
     gap: 8px;
@@ -765,6 +775,16 @@ button.danger {
     font-size: 0.8rem;
     color: var(--muted);
     word-break: break-word;
+}
+
+.file-preview-image {
+    display: block;
+    max-width: 100%;
+    max-height: 280px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    object-fit: contain;
+    background: #050607;
 }
 
 .file-info {
