@@ -1130,6 +1130,14 @@
         els.chatBadge.classList.toggle("hidden", state.unreadCount === 0);
     }
 
+    function openChat() {
+        state.chatOpen = true;
+        state.unreadCount = 0;
+        updateChatBadge();
+        if (!els.chatModal.open) els.chatModal.showModal();
+        els.chatInput.focus();
+    }
+
     function buildEmojiIndex() {
         const byCode = new Map();
 
@@ -2778,7 +2786,10 @@
 
     function toggleLocalMedia(kind) {
         const tracks = [];
-        for (const stream of localMediaStreams()) {
+        const streams = kind === "video"
+            ? [state.localStreams.get("camera"), state.previewStreams.get("camera")].filter(Boolean)
+            : localMediaStreams();
+        for (const stream of streams) {
             if (kind === "audio") {
                 tracks.push(...stream.getAudioTracks());
             } else {
@@ -2858,9 +2869,13 @@
         if (kind === "screen") {
             videoButton.textContent = videoTracks.length === 0 ? "No screen video" : (videoOn ? "Mute screen video" : "Show screen video");
         } else {
-            videoButton.textContent = videoTracks.length === 0 ? "No video" : (videoOn ? "Mute video" : "Show video");
+            videoButton.textContent = videoTracks.length === 0 ? "No video" : (videoOn ? "Mute video (v)" : "Show video (v)");
         }
-        audioButton.textContent = audioTracks.length === 0 ? "No audio" : kind === "screen" ? (audioOn ? "Mute audio" : "Unmute audio") : (audioOn ? "Mute mic" : "Unmute mic");
+        audioButton.textContent = audioTracks.length === 0
+            ? "No audio"
+            : kind === "screen"
+                ? (audioOn ? "Mute audio" : "Unmute audio")
+                : (audioOn ? "Mute audio (m)" : "Unmute audio (m)");
 
         videoButton.classList.toggle("danger", videoOn);
         audioButton.classList.toggle("danger", audioOn);
@@ -4228,13 +4243,7 @@
             button.addEventListener("click", () => setLayout(button.dataset.layout));
         });
 
-        els.openChat.addEventListener("click", () => {
-            state.chatOpen = true;
-            state.unreadCount = 0;
-            updateChatBadge();
-            els.chatModal.showModal();
-            els.chatInput.focus();
-        });
+        els.openChat.addEventListener("click", openChat);
 
         els.chatModal.addEventListener("close", () => {
             state.chatOpen = false;
@@ -4315,6 +4324,12 @@
 
             if (key === "v") {
                 if (toggleLocalMedia("video")) event.preventDefault();
+                return;
+            }
+
+            if (key === "c") {
+                openChat();
+                event.preventDefault();
             }
         });
     }
@@ -4549,7 +4564,7 @@
     }
 
     function tileTitle(config) {
-        return `${config.owner} - ${config.kind === "screen" ? "Screen" : "Camera"}`;
+        return config.kind === "screen" ? `${config.owner} - Screen` : config.owner;
     }
 
     function remoteDisplayName(peerId, metadata) {
