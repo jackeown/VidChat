@@ -44,7 +44,9 @@
         }
     };
     const qualityRank = new Map(qualityLevels.map((quality, index) => [quality, index]));
-    const connectionStaleLimitMs = 10000;
+    const connectionStaleLimitMs = 20000;
+    const connectionRepairFailureLimit = 5;
+    const connectionAbandonFailureLimit = 20;
     const forwardingDirectFanout = 4;
     const forwardingRelayFanout = 4;
 
@@ -67,6 +69,7 @@
         dataConnections: new Map(),
         dataLastSeen: new Map(),
         connectionFailureCounts: new Map(),
+        connectionDebugLog: [],
         streamFailureCounts: new Map(),
         abandonedPeers: new Set(),
         abandonedStreams: new Set(),
@@ -143,6 +146,63 @@
         smile: "😊",
         thumbsup: "👍"
     };
+
+    function debugConnection(event, details = {}) {
+        const peerId = details.peerId;
+        const conn = peerId ? state.dataConnections.get(peerId) : null;
+        const pc = details.pc || findPeerConnection(details.source || conn);
+        const cleanDetails = {};
+        for (const [key, value] of Object.entries(details)) {
+            if (key === "source" || key === "pc") continue;
+            cleanDetails[key] = value;
+        }
+        const lastSeen = peerId ? state.dataLastSeen.get(peerId) : null;
+        const entry = {
+            event,
+            at: new Date().toISOString(),
+            selfId: state.peer && state.peer.id,
+            roomId,
+            peerId,
+            details: cleanDetails,
+            dataConnection: conn ? {
+                open: !!conn.open,
+                type: conn.type,
+                peer: conn.peer
+            } : null,
+            peerConnection: pc ? {
+                connectionState: pc.connectionState,
+                iceConnectionState: pc.iceConnectionState,
+                iceGatheringState: pc.iceGatheringState,
+                signalingState: pc.signalingState
+            } : null,
+            lastSeen,
+            staleMs: typeof lastSeen === "number" && lastSeen > 0 ? Date.now() - lastSeen : null,
+            failureCount: peerId ? state.connectionFailureCounts.get(peerId) || 0 : null,
+            online: navigator.onLine,
+            network: navigator.connection ? {
+                effectiveType: navigator.connection.effectiveType,
+                downlink: navigator.connection.downlink,
+                rtt: navigator.connection.rtt,
+                saveData: navigator.connection.saveData
+            } : null,
+            totals: {
+                dataConnections: state.dataConnections.size,
+                outboundCalls: state.outboundCalls.size,
+                inboundCalls: state.inboundCalls.size,
+                knownPeers: state.knownPeers.size,
+                abandonedPeers: state.abandonedPeers.size
+            }
+        };
+
+        state.connectionDebugLog.push(entry);
+        if (state.connectionDebugLog.length > 100) state.connectionDebugLog.shift();
+        window.vidChatConnectionDebug = state.connectionDebugLog;
+        window.vidChatCopyConnectionDebug = () => JSON.stringify(state.connectionDebugLog, null, 2);
+        console.groupCollapsed(`[VidChat connection] ${event}${peerId ? ` ${shortPeer(peerId)}` : ""}`);
+        console.log(entry);
+        console.groupEnd();
+    }
+
     const emojis = buildEmojiIndex();
     const emojiByCode = new Map(emojis.map((emoji) => [emoji.code.toLowerCase(), emoji.char]));
 
@@ -260,6 +320,7 @@
         peer.on("connection", (conn) => registerConnection(conn));
         peer.on("call", handleIncomingCall);
         peer.on("disconnected", () => {
+            debugConnection("peerjs-disconnected", { peerId: state.peer && state.peer.id });
             setStatus("Disconnected from PeerJS. Reconnecting...");
             peer.reconnect();
         });
@@ -285,8 +346,14 @@
             rememberReceivedStream(sourcePeerId, kind, stream, call.metadata);
             updateForwardingTask(sourcePeerId, kind);
         });
-        call.on("close", () => clearIncomingCall(key, call));
-        call.on("error", () => clearIncomingCall(key, call));
+        call.on("close", () => {
+            debugConnection("media-call-close", { peerId: sourcePeerId, kind, source: call });
+            clearIncomingCall(key, call);
+        });
+        call.on("error", (error) => {
+            debugConnection("media-call-error", { peerId: sourcePeerId, kind, source: call, error: error && (error.message || error.type || String(error)) });
+            clearIncomingCall(key, call);
+        });
     }
 
     function clearIncomingCall(key, call) {
@@ -307,6 +374,7 @@
             clearDataConnectionRetry(conn.peer);
             markPeerSeen(conn.peer);
             rememberPeer(conn.peer);
+            debugConnection("data-open", { peerId: conn.peer, source: conn });
             conn.send({ type: "hello", peerId: state.peer.id, displayName: state.displayName, streamForwardingEnabled: state.streamForwardingEnabled });
             sendStreamManifestTo(conn.peer);
 
@@ -328,27 +396,30 @@
         conn.on("close", () => {
             if (state.dataConnections.get(conn.peer) !== conn) return;
             state.dataConnections.delete(conn.peer);
-            state.dataLastSeen.delete(conn.peer);
             clearMissingStreamRequestsForPeer(conn.peer);
-            closeCallsForPeer(conn.peer);
+            debugConnection("data-close-retry-queued", { peerId: conn.peer, source: conn });
             failIncomingFilesForPeer(conn.peer, "Transfer interrupted.");
             failOutgoingFilesForPeer(conn.peer, "Peer disconnected during transfer.");
-            removePeerTiles(conn.peer);
-            if (state.isHost && coordinatorConnection) broadcast({ type: "peer-left", peerId: conn.peer });
             if (conn.peer === roomPeerId) {
                 scheduleCoordinatorClaim(randomCoordinatorDelay());
+            } else {
+                rememberPeer(conn.peer);
+                scheduleDataConnectionRetry(conn.peer, false);
             }
             updatePeerStatus();
         });
-        conn.on("error", () => {
+        conn.on("error", (error) => {
             if (state.dataConnections.get(conn.peer) !== conn) return;
             state.dataConnections.delete(conn.peer);
-            state.dataLastSeen.delete(conn.peer);
             clearMissingStreamRequestsForPeer(conn.peer);
+            debugConnection("data-error-retry-queued", { peerId: conn.peer, source: conn, error: error && (error.message || error.type || String(error)) });
             failIncomingFilesForPeer(conn.peer, "Transfer failed.");
             failOutgoingFilesForPeer(conn.peer, "Peer connection failed during transfer.");
             if (conn.peer === roomPeerId) {
                 scheduleCoordinatorClaim(randomCoordinatorDelay());
+            } else {
+                rememberPeer(conn.peer);
+                scheduleDataConnectionRetry(conn.peer, false);
             }
             updatePeerStatus();
         });
@@ -1177,9 +1248,11 @@
             state.dataConnections.delete(peerId);
         }
 
+        debugConnection("data-connect-start", { peerId, required });
         const conn = state.peer.connect(peerId, { reliable: true });
         registerConnection(conn);
-        conn.on("error", () => {
+        conn.on("error", (error) => {
+            debugConnection("data-connect-error", { peerId, required, source: conn, error: error && (error.message || error.type || String(error)) });
             if (required) setStatus("The room is not reachable yet. Check the link or try again.");
             if (peerId === roomPeerId) scheduleCoordinatorClaim(randomCoordinatorDelay());
             scheduleDataConnectionRetry(peerId, required);
@@ -1191,12 +1264,14 @@
 
         const attempt = (state.dataRetryAttempts.get(peerId) || 0) + 1;
         if (attempt > maxDataConnectionRetries) {
+            debugConnection("data-connect-retries-exhausted", { peerId, required, attempt });
             if (peerId === roomPeerId) scheduleCoordinatorClaim(randomCoordinatorDelay());
             return;
         }
 
         state.dataRetryAttempts.set(peerId, attempt);
         const delay = Math.min(8000, 600 * (2 ** (attempt - 1)));
+        debugConnection("data-connect-retry-scheduled", { peerId, required, attempt, delay });
         const timer = window.setTimeout(() => {
             state.dataRetryTimers.delete(peerId);
             if (!state.dataConnections.has(peerId)) connectData(peerId, required);
@@ -2028,8 +2103,10 @@
         if (!state.peer || state.peer.destroyed) return;
         if (state.peer.disconnected && typeof state.peer.reconnect === "function") {
             try {
+                debugConnection("peerjs-reconnect-start", { peerId: state.peer.id });
                 state.peer.reconnect();
             } catch (error) {
+                debugConnection("peerjs-reconnect-error", { peerId: state.peer.id, error: error && (error.message || String(error)) });
                 setStatus(`Reconnect error: ${error.message}`);
             }
         }
@@ -2039,8 +2116,10 @@
         if (!state.coordinatorPeer || state.coordinatorPeer.destroyed) return;
         if (state.coordinatorPeer.disconnected && typeof state.coordinatorPeer.reconnect === "function") {
             try {
+                debugConnection("coordinator-reconnect-start", { peerId: roomPeerId });
                 state.coordinatorPeer.reconnect();
             } catch (error) {
+                debugConnection("coordinator-reconnect-error", { peerId: roomPeerId, error: error && (error.message || String(error)) });
                 state.coordinatorPeer.destroy();
                 state.coordinatorPeer = null;
                 state.isHost = false;
@@ -2056,7 +2135,7 @@
             try {
                 conn.send({ type: "health-ping", timestamp: now });
             } catch (error) {
-                state.dataLastSeen.set(peerId, 0);
+                debugConnection("health-ping-send-failed", { peerId, source: conn, error: error && (error.message || String(error)) });
             }
         }
     }
@@ -2158,8 +2237,10 @@
                 const failures = (state.streamFailureCounts.get(key) || 0) + 1;
                 state.streamFailureCounts.set(key, failures);
                 if (failures === 3) {
+                    debugConnection("remote-stream-suspect", { peerId, kind, failures });
                     requestRemoteStream(peerId, kind, "health-check");
                 } else if (failures >= 12) {
+                    debugConnection("remote-stream-abandoned", { peerId, kind, failures });
                     state.abandonedStreams.add(key);
                     state.streamFailureCounts.delete(key);
                     state.missingStreamRequests.delete(key);
@@ -2226,6 +2307,7 @@
         const now = Date.now();
         if (now - (state.missingStreamRequests.get(key) || 0) < 10000) return;
         state.missingStreamRequests.set(key, now);
+        debugConnection("remote-stream-request", { peerId, kind, reason });
         sendToPeer(peerId, { type: "request-stream", kind, reason });
     }
 
@@ -2383,7 +2465,8 @@
             const lastSeen = state.dataLastSeen.get(peerId);
             const heartbeatFailed = lastSeen === 0;
             const staleHeartbeat = typeof lastSeen === "number" && lastSeen > 0 && now - lastSeen > connectionStaleLimitMs;
-            const failed = !conn.open || heartbeatFailed || staleHeartbeat || isPeerConnectionInterrupted(findPeerConnection(conn));
+            const pc = findPeerConnection(conn);
+            const failed = !conn.open || heartbeatFailed || staleHeartbeat || isPeerConnectionDead(pc);
             if (!failed) {
                 if (peerId !== roomPeerId) state.connectionFailureCounts.delete(peerId);
                 continue;
@@ -2391,19 +2474,33 @@
 
             const failures = (state.connectionFailureCounts.get(peerId) || 0) + 1;
             state.connectionFailureCounts.set(peerId, failures);
-            if (failures < 3) continue;
+            debugConnection("connection-suspect", {
+                peerId,
+                source: conn,
+                pc,
+                failures,
+                reasons: {
+                    dataOpen: !!conn.open,
+                    heartbeatFailed,
+                    staleHeartbeat,
+                    staleMs: typeof lastSeen === "number" && lastSeen > 0 ? now - lastSeen : null,
+                    peerConnectionState: pc && pc.connectionState,
+                    iceConnectionState: pc && pc.iceConnectionState
+                }
+            });
+            if (failures < connectionRepairFailureLimit) continue;
 
             state.dataConnections.delete(peerId);
-            state.dataLastSeen.delete(peerId);
-            state.expectedRemoteStreams.delete(peerId);
-            clearMissingStreamRequestsForPeer(peerId);
+            clearDataConnectionRetry(peerId);
             conn.close();
-            closeCallsForPeer(peerId);
             if (peerId === roomPeerId) {
+                debugConnection("room-connection-repair", { peerId, failures });
                 scheduleCoordinatorClaim(randomCoordinatorDelay());
-            } else if (staleHeartbeat || failures >= 10) {
+            } else if (failures >= connectionAbandonFailureLimit) {
+                debugConnection("peer-abandoned", { peerId, failures });
                 abandonPeer(peerId);
             } else {
+                debugConnection("data-reconnect-start", { peerId, failures });
                 connectData(peerId, false);
             }
         }
@@ -2412,15 +2509,19 @@
             if (connectedPeers.has(peerId) || state.abandonedPeers.has(peerId)) continue;
             const failures = (state.connectionFailureCounts.get(peerId) || 0) + 1;
             state.connectionFailureCounts.set(peerId, failures);
-            if (failures >= 12) {
+            debugConnection("known-peer-missing", { peerId, failures });
+            if (failures >= connectionAbandonFailureLimit) {
+                debugConnection("known-peer-abandoned", { peerId, failures });
                 abandonPeer(peerId);
-            } else if (failures >= 3) {
+            } else if (failures >= connectionRepairFailureLimit) {
                 connectData(peerId, false);
             }
         }
 
         for (const [key, call] of [...state.outboundCalls]) {
-            if (!isPeerConnectionDead(findPeerConnection(call))) continue;
+            const pc = findPeerConnection(call);
+            if (!isPeerConnectionDead(pc)) continue;
+            debugConnection("outbound-media-dead", { peerId: splitCallKey(key)[1], key, source: call, pc });
             state.outboundCalls.delete(key);
             call.close();
             const [kind, peerId] = splitCallKey(key);
@@ -2429,15 +2530,19 @@
         }
 
         for (const [key, call] of [...state.forwardedOutboundCalls]) {
-            if (!isPeerConnectionDead(findPeerConnection(call))) continue;
+            const pc = findPeerConnection(call);
+            if (!isPeerConnectionDead(pc)) continue;
+            const parts = splitForwardedCallKey(key);
+            debugConnection("forwarded-media-dead", { peerId: parts && parts.targetPeerId, key, source: call, pc });
             state.forwardedOutboundCalls.delete(key);
             call.close();
-            const parts = splitForwardedCallKey(key);
             if (parts) updateForwardingTask(parts.sourcePeerId, parts.kind);
         }
 
         for (const [key, call] of [...state.inboundCalls]) {
-            if (!isPeerConnectionDead(findPeerConnection(call))) continue;
+            const pc = findPeerConnection(call);
+            if (!isPeerConnectionDead(pc)) continue;
+            debugConnection("inbound-media-dead", { peerId: splitCallKey(key)[1], key, source: call, pc });
             clearIncomingCall(key, call);
             call.close();
         }
@@ -2456,14 +2561,7 @@
 
     function isPeerConnectionDead(pc) {
         if (!pc) return false;
-        const stateValue = pc.connectionState || pc.iceConnectionState;
-        return stateValue === "failed" || stateValue === "closed";
-    }
-
-    function isPeerConnectionInterrupted(pc) {
-        if (!pc) return false;
-        const stateValue = pc.connectionState || pc.iceConnectionState;
-        return stateValue === "failed" || stateValue === "closed" || stateValue === "disconnected";
+        return [pc.connectionState, pc.iceConnectionState].some((stateValue) => stateValue === "failed" || stateValue === "closed");
     }
 
     function ensureLocalStreamsAreShared(force = false) {
