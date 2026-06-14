@@ -44,9 +44,11 @@
         }
     };
     const qualityRank = new Map(qualityLevels.map((quality, index) => [quality, index]));
-    const connectionStaleLimitMs = 20000;
-    const connectionRepairFailureLimit = 5;
-    const connectionAbandonFailureLimit = 20;
+    const connectionStaleLimitMs = 45000;
+    const connectionRepairFailureLimit = 6;
+    const connectionAbandonFailureLimit = 24;
+    const remoteTileRemovalDelayMs = 15000;
+    const statusVisibleMs = 8000;
     const forwardingDirectFanout = 4;
     const forwardingRelayFanout = 4;
 
@@ -70,6 +72,9 @@
         dataLastSeen: new Map(),
         connectionFailureCounts: new Map(),
         connectionDebugLog: [],
+        statusLog: [],
+        statusFadeTimer: null,
+        statusClearTimer: null,
         streamFailureCounts: new Map(),
         abandonedPeers: new Set(),
         abandonedStreams: new Set(),
@@ -82,6 +87,7 @@
         peerNames: new Map(),
         tiles: new Map(),
         tileConfigs: new Map(),
+        remoteTileRemovalTimers: new Map(),
         displayName: ensureDisplayName(),
         chatName: localStorage.getItem("vidChatChatName") || "MeliChat",
         bgColor: localStorage.getItem("vidChatBgColor") || "#000000",
@@ -234,6 +240,8 @@
         connectionSummary: document.getElementById("connectionSummary"),
         connectionSummaryMeta: document.getElementById("connectionSummaryMeta"),
         refreshConnections: document.getElementById("refreshConnections"),
+        statusLog: document.getElementById("statusLog"),
+        clearStatusLog: document.getElementById("clearStatusLog"),
         displayName: document.getElementById("displayName"),
         brandName: document.getElementById("brandName"),
         chatNameInput: document.getElementById("chatNameInput"),
@@ -277,7 +285,14 @@
         });
 
         peer.on("error", (error) => {
-            setStatus(`Peer error: ${error.message || error.type}`);
+            const message = `Peer error: ${error.message || error.type}`;
+            debugConnection("peerjs-error", { peerId: peer.id, error: error && (error.message || error.type || String(error)) });
+            if (isTransientPeerError(error)) {
+                addStatusLog(message);
+                setStatus("Connection hiccup. Retrying in the background.");
+                return;
+            }
+            setStatus(message);
         });
     }
 
@@ -325,7 +340,7 @@
         peer.on("call", handleIncomingCall);
         peer.on("disconnected", () => {
             debugConnection("peerjs-disconnected", { peerId: state.peer && state.peer.id });
-            setStatus("Disconnected from PeerJS. Reconnecting...");
+            setStatus("Signaling connection paused. Reconnecting...");
             peer.reconnect();
         });
     }
@@ -364,7 +379,7 @@
         if (state.inboundCalls.get(key) !== call) return;
         state.inboundCalls.delete(key);
         const [kind, peerId] = splitCallKey(key);
-        removeTile(tileId(peerId, kind));
+        scheduleRemoteTileRemoval(peerId, kind);
     }
 
     function registerConnection(conn, coordinatorConnection = false) {
