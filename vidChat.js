@@ -130,7 +130,7 @@
     };
     const pendingRemoteAudioElements = new Set();
     const boundRemoteAudioTracks = new WeakSet();
-    const maxDataConnectionRetries = 4;
+    const maxDataConnectionRetries = 8;
     const maxMediaCallRetries = 3;
     const fileChunkSize = 64 * 1024;
     const fileBackpressureLimit = 1024 * 1024;
@@ -324,6 +324,7 @@
                 connectData(roomPeerId, true);
                 return;
             }
+            scheduleCoordinatorClaim(randomCoordinatorDelay());
             setStatus(`Room coordinator error: ${error.message || error.type}`);
         });
         coordinatorPeer.on("close", () => {
@@ -1315,7 +1316,7 @@
         }
 
         state.dataRetryAttempts.set(peerId, attempt);
-        const delay = Math.min(8000, 600 * (2 ** (attempt - 1)));
+        const delay = Math.min(15000, 800 * (2 ** (attempt - 1)));
         debugConnection("data-connect-retry-scheduled", { peerId, required, attempt, delay });
         const timer = window.setTimeout(() => {
             state.dataRetryTimers.delete(peerId);
@@ -2085,7 +2086,7 @@
 
     function startHealthLoop() {
         if (state.healthTimer) return;
-        state.healthTimer = window.setInterval(runHealthCheck, 1000);
+        state.healthTimer = window.setInterval(runHealthCheck, 3000);
         window.addEventListener("online", scheduleNetworkRecovery);
         window.addEventListener("offline", () => setStatus("Network offline. Waiting to reconnect..."));
         window.addEventListener("focus", runHealthCheck);
@@ -2652,11 +2653,13 @@
 
     function addRemoteStream(peerId, metadata, stream) {
         const kind = metadata && metadata.kind ? metadata.kind : "camera";
+        const id = tileId(peerId, kind);
+        clearRemoteTileRemoval(id);
         if (metadata && metadata.displayName) {
             setPeerName(peerId, metadata.displayName);
         }
         addTile({
-            id: tileId(peerId, kind),
+            id,
             owner: remoteDisplayName(peerId, metadata),
             subtitle: kind === "screen" ? screenSubtitle(stream) : "Camera and microphone",
             kind,
@@ -2676,6 +2679,11 @@
             height: oldTile.offsetHeight,
             placed: oldTile.dataset.placed === "true"
         } : null;
+
+        if (oldTile && !config.local) {
+            updateRemoteTile(oldTile, config, oldFrame);
+            return;
+        }
 
         removeTile(config.id);
 
@@ -2791,6 +2799,53 @@
             placeTileWithoutOverlap(tile);
         }
         resolveOverlaps();
+        applyFocus();
+        syncFullscreenSelfView();
+    }
+
+    function updateRemoteTile(tile, config, oldFrame) {
+        clearRemoteTileRemoval(config.id);
+
+        const previousConfig = state.tileConfigs.get(config.id) || {};
+        const nextConfig = {
+            ...previousConfig,
+            ...config,
+            createdAt: previousConfig.createdAt || Date.now()
+        };
+        if (oldFrame && oldFrame.placed) {
+            nextConfig.x = oldFrame.x;
+            nextConfig.y = oldFrame.y;
+            nextConfig.width = oldFrame.width;
+            nextConfig.height = oldFrame.height;
+        }
+
+        const video = tile.querySelector("video");
+        const title = tile.querySelector(".tile-title");
+        const hasRemoteAudio = config.stream.getAudioTracks().length > 0;
+
+        tile.classList.remove("reconnecting", "camera", "screen");
+        tile.classList.add(config.kind);
+        if (title) title.textContent = tileTitle(nextConfig);
+
+        if (video) {
+            pendingRemoteAudioElements.delete(video);
+            video.dataset.remoteMedia = "true";
+            video.dataset.remoteAudioMutedForAutoplay = hasRemoteAudio ? "true" : "false";
+            video.muted = hasRemoteAudio;
+            video.defaultMuted = video.muted;
+            if (video.srcObject !== config.stream) video.srcObject = config.stream;
+            bindRemoteAudioTrackEvents(config.stream, video);
+            ensureVideoPlayback(video);
+            if (hasRemoteAudio) {
+                queueRemoteAudioUnlock(video, false);
+                unlockRemoteAudio();
+            }
+        }
+
+        state.tileConfigs.set(config.id, nextConfig);
+        updateMuteIndicator(config.id);
+        updateVideoIndicator(config.id);
+        refreshOpenFeedModal();
         applyFocus();
         syncFullscreenSelfView();
     }
@@ -3174,6 +3229,7 @@
     }
 
     function removeTile(id) {
+        clearRemoteTileRemoval(id);
         const tile = state.tiles.get(id);
         if (!tile) return;
         const video = tile.querySelector("video");
@@ -3184,6 +3240,29 @@
         if (state.focusedTileId === id) state.focusedTileId = null;
         applyFocus();
         syncFullscreenSelfView();
+    }
+
+    function scheduleRemoteTileRemoval(peerId, kind) {
+        const id = tileId(peerId, kind);
+        const tile = state.tiles.get(id);
+        if (!tile || state.remoteTileRemovalTimers.has(id)) return;
+
+        tile.classList.add("reconnecting");
+        const timer = window.setTimeout(() => {
+            state.remoteTileRemovalTimers.delete(id);
+            removeTile(id);
+            forgetExpectedRemoteStream(peerId, kind);
+            updatePeerStatus();
+        }, remoteTileRemovalDelayMs);
+        state.remoteTileRemovalTimers.set(id, timer);
+    }
+
+    function clearRemoteTileRemoval(id) {
+        const timer = state.remoteTileRemovalTimers.get(id);
+        if (timer) window.clearTimeout(timer);
+        state.remoteTileRemovalTimers.delete(id);
+        const tile = state.tiles.get(id);
+        if (tile) tile.classList.remove("reconnecting");
     }
 
     function removePeerTiles(peerId) {
@@ -4186,6 +4265,7 @@
         els.screenToggle.addEventListener("click", toggleScreen);
         els.screenAudioMute.addEventListener("click", toggleScreenAudioMute);
         els.appSettingsButton.addEventListener("click", () => {
+            renderStatusLog();
             startConnectionSummaryUpdates();
             els.appSettingsModal.showModal();
         });
@@ -4194,6 +4274,10 @@
             refreshActiveFeedModal();
         });
         els.refreshConnections.addEventListener("click", updateConnectionSummary);
+        els.clearStatusLog.addEventListener("click", () => {
+            state.statusLog = [];
+            renderStatusLog();
+        });
         els.displayName.value = state.displayName;
         els.displayName.addEventListener("change", () => updateDisplayName(els.displayName.value));
         els.displayName.addEventListener("keydown", (event) => {
@@ -4715,8 +4799,65 @@
         }
     }
 
-    function setStatus(message) {
-        els.status.textContent = message;
+    function setStatus(message, options = {}) {
+        const text = String(message || "");
+        if (options.log !== false && text) addStatusLog(text);
+
+        if (state.statusFadeTimer) window.clearTimeout(state.statusFadeTimer);
+        if (state.statusClearTimer) window.clearTimeout(state.statusClearTimer);
+        state.statusFadeTimer = null;
+        state.statusClearTimer = null;
+
+        els.status.classList.remove("fading");
+        if (!text) {
+            els.status.textContent = "";
+            return;
+        }
+
+        els.status.textContent = text;
+        state.statusFadeTimer = window.setTimeout(() => {
+            els.status.classList.add("fading");
+        }, statusVisibleMs);
+        state.statusClearTimer = window.setTimeout(() => {
+            els.status.textContent = "";
+            els.status.classList.remove("fading");
+            state.statusFadeTimer = null;
+            state.statusClearTimer = null;
+        }, statusVisibleMs + 1000);
+    }
+
+    function addStatusLog(message) {
+        state.statusLog.unshift({
+            message,
+            at: Date.now()
+        });
+        if (state.statusLog.length > 200) state.statusLog.length = 200;
+        renderStatusLog();
+    }
+
+    function renderStatusLog() {
+        if (!els.statusLog) return;
+        els.statusLog.replaceChildren();
+
+        if (!state.statusLog.length) {
+            const empty = document.createElement("p");
+            empty.className = "connection-empty";
+            empty.textContent = "No status messages yet.";
+            els.statusLog.appendChild(empty);
+            return;
+        }
+
+        for (const entry of state.statusLog) {
+            const item = document.createElement("li");
+            const time = document.createElement("time");
+            const text = document.createElement("span");
+            item.className = "status-log-item";
+            time.dateTime = new Date(entry.at).toISOString();
+            time.textContent = new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+            text.textContent = entry.message;
+            item.append(time, text);
+            els.statusLog.appendChild(item);
+        }
     }
 
     function screenSubtitle(stream) {
@@ -4789,6 +4930,16 @@
             .replace(/[^a-z0-9]+/g, "-")
             .replace(/^-+|-+$/g, "")
             .slice(0, 48);
+    }
+
+    function isTransientPeerError(error) {
+        const type = String(error && error.type || "").toLowerCase();
+        const message = String(error && error.message || "").toLowerCase();
+        return type === "webrtc"
+            || type === "network"
+            || message.includes("could not connect to peer")
+            || message.includes("ice connection failed")
+            || message.includes("webrtc");
     }
 
     function peerOptions() {

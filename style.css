@@ -216,6 +216,12 @@ button.danger {
     color: var(--muted);
     font-size: 0.82rem;
     text-shadow: 2px 2px 5px black;
+    opacity: 1;
+    transition: opacity 1s ease;
+}
+
+.status.fading {
+    opacity: 0;
 }
 
 .check-control,
@@ -350,6 +356,20 @@ button.danger {
 .video-tile.video-muted video {
     filter: grayscale(1);
     opacity: 0.42;
+}
+
+.video-tile.reconnecting::after {
+    content: "Reconnecting...";
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    display: grid;
+    place-items: center;
+    background: rgba(5, 6, 7, 0.42);
+    color: #ffffff;
+    font-size: 0.9rem;
+    font-weight: 800;
+    pointer-events: none;
 }
 
 .fullscreen-self-view {
@@ -1038,7 +1058,8 @@ button.danger {
     padding: 0 10px;
 }
 
-.connection-summary {
+.connection-summary,
+.status-log {
     display: grid;
     gap: 12px;
     border: 1px solid var(--line);
@@ -1047,7 +1068,8 @@ button.danger {
     padding: 12px;
 }
 
-.connection-summary-header {
+.connection-summary-header,
+.status-log-header {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -1055,23 +1077,61 @@ button.danger {
 }
 
 .connection-summary h3,
+.status-log h3,
 .connection-card h4 {
     margin: 0;
 }
 
-.connection-summary h3 {
+.connection-summary h3,
+.status-log h3 {
     font-size: 1rem;
 }
 
 .connection-summary p,
+.status-log p,
 .connection-card p {
     margin: 4px 0 0;
     color: var(--muted);
     font-size: 0.82rem;
 }
 
-.connection-summary-header button {
+.connection-summary-header button,
+.status-log-header button {
     min-height: 34px;
+}
+
+.status-log-list {
+    max-height: 220px;
+    display: grid;
+    gap: 8px;
+    overflow-y: auto;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.status-log-item {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+    align-items: baseline;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel-strong);
+    padding: 9px 10px;
+}
+
+.status-log-item time {
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.status-log-item span {
+    min-width: 0;
+    color: var(--text);
+    font-size: 0.82rem;
+    word-break: break-word;
 }
 
 .connection-list {
