@@ -91,7 +91,7 @@
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
         streamForwardingEnabled: localStorage.getItem("vidChatStreamForwarding") !== "false",
-        suggestThemeToPeers: localStorage.getItem("vidChatSuggestTheme") === "true",
+        suggestThemeToPeers: false,
         themeOverriddenThisSession: false,
         pendingSuggestedTheme: null,
         cameraFacingMode: localStorage.getItem("vidChatCameraFacingMode") || "",
@@ -4267,7 +4267,6 @@
         els.suggestThemeToPeers.checked = state.suggestThemeToPeers;
         els.suggestThemeToPeers.addEventListener("change", () => {
             state.suggestThemeToPeers = els.suggestThemeToPeers.checked;
-            localStorage.setItem("vidChatSuggestTheme", String(state.suggestThemeToPeers));
             if (state.suggestThemeToPeers) broadcastThemeSuggestion();
         });
         document.querySelectorAll("input[name='videoFit']").forEach((input) => {
