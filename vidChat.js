@@ -91,6 +91,9 @@
         videoFit: localStorage.getItem("vidChatVideoFit") || "contain",
         mirrorLocalCamera: localStorage.getItem("vidChatMirrorLocalCamera") !== "false",
         streamForwardingEnabled: localStorage.getItem("vidChatStreamForwarding") !== "false",
+        suggestThemeToPeers: localStorage.getItem("vidChatSuggestTheme") === "true",
+        themeOverriddenThisSession: false,
+        pendingSuggestedTheme: null,
         cameraFacingMode: localStorage.getItem("vidChatCameraFacingMode") || "",
         cameraSendQuality: localStorage.getItem("vidChatCameraQuality") || "auto",
         screenSendQuality: localStorage.getItem("vidChatScreenQuality") || "auto",
@@ -242,6 +245,7 @@
         accentColorInput: document.getElementById("accentColorInput"),
         mirrorLocalCamera: document.getElementById("mirrorLocalCamera"),
         streamForwardingEnabled: document.getElementById("streamForwardingEnabled"),
+        suggestThemeToPeers: document.getElementById("suggestThemeToPeers"),
         feedModal: document.getElementById("feedModal"),
         feedModalTitle: document.getElementById("feedModalTitle"),
         feedModalSubtitle: document.getElementById("feedModalSubtitle"),
@@ -391,6 +395,7 @@
 
             sendLocalStreamsTo(conn.peer);
             publishLocalStreamManifest(true);
+            sendThemeSuggestionToPeer(conn.peer);
             updatePeerStatus();
         });
 
@@ -480,6 +485,11 @@
 
         if (message.type === "request-stream") {
             resendLocalStreamToPeer(peerId, message.kind);
+            return;
+        }
+
+        if (message.type === "theme-suggestion") {
+            handleThemeSuggestion(peerId, message);
             return;
         }
 
@@ -4184,6 +4194,7 @@
             state.chatName = els.chatNameInput.value || "MeliChat";
             localStorage.setItem("vidChatChatName", state.chatName);
             applyChatName();
+            markThemeOverridden();
         });
 
         els.customRoomId.value = roomId;
@@ -4204,6 +4215,7 @@
             state.bgColor = els.bgColorInput.value;
             localStorage.setItem("vidChatBgColor", state.bgColor);
             applyTheme();
+            markThemeOverridden();
         });
 
         els.bgImageInput.addEventListener("change", (event) => {
@@ -4215,6 +4227,7 @@
                 state.bgImage = e.target.result;
                 localStorage.setItem("vidChatBgImage", state.bgImage);
                 applyTheme();
+                markThemeOverridden();
             };
             reader.readAsDataURL(file);
         });
@@ -4224,6 +4237,7 @@
             localStorage.removeItem("vidChatBgImage");
             els.bgImageInput.value = "";
             applyTheme();
+            markThemeOverridden();
         });
 
         els.accentColorInput.value = state.accentColor;
@@ -4231,6 +4245,7 @@
             state.accentColor = els.accentColorInput.value;
             localStorage.setItem("vidChatAccentColor", state.accentColor);
             applyTheme();
+            markThemeOverridden();
         });
 
         els.mirrorLocalCamera.checked = state.mirrorLocalCamera;
@@ -4248,6 +4263,12 @@
                 clearAllForwardingTasks();
             }
             rebalanceStreamForwarding(true);
+        });
+        els.suggestThemeToPeers.checked = state.suggestThemeToPeers;
+        els.suggestThemeToPeers.addEventListener("change", () => {
+            state.suggestThemeToPeers = els.suggestThemeToPeers.checked;
+            localStorage.setItem("vidChatSuggestTheme", String(state.suggestThemeToPeers));
+            if (state.suggestThemeToPeers) broadcastThemeSuggestion();
         });
         document.querySelectorAll("input[name='videoFit']").forEach((input) => {
             input.checked = input.value === state.videoFit;
@@ -4371,6 +4392,79 @@
         document.documentElement.style.setProperty("--bg", state.bgColor);
         document.documentElement.style.setProperty("--bg-image", state.bgImage ? `url(${state.bgImage})` : "none");
         document.documentElement.style.setProperty("--accent", state.accentColor);
+    }
+
+    function buildThemeSuggestion() {
+        return {
+            type: "theme-suggestion",
+            chatName: state.chatName,
+            bgColor: state.bgColor,
+            bgImage: state.bgImage,
+            accentColor: state.accentColor
+        };
+    }
+
+    function broadcastThemeSuggestion() {
+        if (!state.suggestThemeToPeers) return;
+        broadcast(buildThemeSuggestion());
+    }
+
+    function sendThemeSuggestionToPeer(peerId) {
+        if (!state.suggestThemeToPeers) return;
+        sendToPeer(peerId, buildThemeSuggestion());
+    }
+
+    function handleThemeSuggestion(peerId, message) {
+        state.pendingSuggestedTheme = {
+            chatName: message.chatName,
+            bgColor: message.bgColor,
+            bgImage: typeof message.bgImage === "string" ? message.bgImage : "",
+            accentColor: message.accentColor,
+            fromPeerId: peerId
+        };
+
+        if (state.themeOverriddenThisSession) return;
+        applySuggestedTheme();
+    }
+
+    function applySuggestedTheme() {
+        const theme = state.pendingSuggestedTheme;
+        if (!theme) return;
+
+        let changed = false;
+        if (theme.chatName && theme.chatName !== state.chatName) {
+            state.chatName = theme.chatName;
+            changed = true;
+        }
+        if (theme.bgColor && theme.bgColor !== state.bgColor) {
+            state.bgColor = theme.bgColor;
+            changed = true;
+        }
+        if (typeof theme.bgImage === "string" && theme.bgImage !== state.bgImage) {
+            state.bgImage = theme.bgImage;
+            changed = true;
+        }
+        if (theme.accentColor && theme.accentColor !== state.accentColor) {
+            state.accentColor = theme.accentColor;
+            changed = true;
+        }
+
+        if (changed) {
+            applyTheme();
+            applyChatName();
+            syncThemeInputs();
+        }
+    }
+
+    function syncThemeInputs() {
+        if (els.chatNameInput) els.chatNameInput.value = state.chatName;
+        if (els.bgColorInput) els.bgColorInput.value = state.bgColor;
+        if (els.accentColorInput) els.accentColorInput.value = state.accentColor;
+    }
+
+    function markThemeOverridden() {
+        state.themeOverriddenThisSession = true;
+        broadcastThemeSuggestion();
     }
 
     function initQualitySelect(select, kind, value, onChange) {
