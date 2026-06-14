@@ -364,6 +364,10 @@
     }
 
     function registerConnection(conn, coordinatorConnection = false) {
+        if (!conn._createdAt) {
+            conn._createdAt = Date.now();
+        }
+
         if (state.dataConnections.has(conn.peer)) {
             const oldConn = state.dataConnections.get(conn.peer);
             if (oldConn.open) oldConn.close();
@@ -371,6 +375,7 @@
 
         state.dataConnections.set(conn.peer, conn);
         conn.on("open", () => {
+            conn._wasOpened = true;
             clearDataConnectionRetry(conn.peer);
             markPeerSeen(conn.peer);
             rememberPeer(conn.peer);
@@ -464,7 +469,7 @@
         }
 
         if (message.type === "forwarding-capability") {
-            rebalanceStreamForwarding(true);
+            rebalanceStreamForwarding(false);
             return;
         }
 
@@ -1250,14 +1255,21 @@
         if (state.abandonedPeers.has(peerId)) return;
         if (!peerId || peerId === state.peer.id) return;
         const existing = state.dataConnections.get(peerId);
-        if (existing && existing.open) return;
         if (existing) {
+            if (existing.open) return;
+            const now = Date.now();
+            const isConnecting = !existing._wasOpened && (now - (existing._createdAt || 0) < 15000);
+            if (isConnecting) {
+                debugConnection("data-connect-ignored-already-connecting", { peerId, required });
+                return;
+            }
             existing.close();
             state.dataConnections.delete(peerId);
         }
 
         debugConnection("data-connect-start", { peerId, required });
         const conn = state.peer.connect(peerId, { reliable: true });
+        conn._createdAt = Date.now();
         registerConnection(conn);
         conn.on("error", (error) => {
             debugConnection("data-connect-error", { peerId, required, source: conn, error: error && (error.message || error.type || String(error)) });
@@ -1682,7 +1694,7 @@
 
     function sendLocalStreamsTo(peerId) {
         if (!peerId || peerId === roomPeerId) return;
-        rebalanceStreamForwarding(true);
+        rebalanceStreamForwarding(false);
     }
 
     function callPeer(peerId, kind, stream, attempt = 0, metadataOverrides = {}) {
@@ -1732,7 +1744,7 @@
         const timer = window.setTimeout(() => {
             state.callRetryTimers.delete(key);
             if (state.localStreams.get(kind) === stream && state.dataConnections.has(peerId)) {
-                routeLocalStream(kind, stream, true);
+                routeLocalStream(kind, stream, false);
             }
         }, delay);
         state.callRetryTimers.set(key, timer);
@@ -2474,7 +2486,14 @@
             const heartbeatFailed = lastSeen === 0;
             const staleHeartbeat = typeof lastSeen === "number" && lastSeen > 0 && now - lastSeen > connectionStaleLimitMs;
             const pc = findPeerConnection(conn);
-            const failed = !conn.open || heartbeatFailed || staleHeartbeat || isPeerConnectionDead(pc);
+            
+            // Connection is failed if it was opened once and then conn.open became false,
+            // or if it heartbeat failed/staled, or if the WebRTC peer connection is dead.
+            // For a connecting connection, only treat as failed if it has timed out (15 seconds).
+            const isConnectingTimeout = !conn.open && !conn._wasOpened && (now - (conn._createdAt || 0) > 15000);
+            const isClosedAfterOpen = !conn.open && conn._wasOpened;
+            const failed = isConnectingTimeout || isClosedAfterOpen || heartbeatFailed || staleHeartbeat || isPeerConnectionDead(pc);
+
             if (!failed) {
                 if (peerId !== roomPeerId) state.connectionFailureCounts.delete(peerId);
                 continue;
@@ -2514,7 +2533,7 @@
         }
 
         for (const peerId of [...state.knownPeers]) {
-            if (connectedPeers.has(peerId) || state.abandonedPeers.has(peerId)) continue;
+            if (connectedPeers.has(peerId) || state.abandonedPeers.has(peerId) || state.dataRetryTimers.has(peerId)) continue;
             const failures = (state.connectionFailureCounts.get(peerId) || 0) + 1;
             state.connectionFailureCounts.set(peerId, failures);
             debugConnection("known-peer-missing", { peerId, failures });
@@ -2534,7 +2553,7 @@
             call.close();
             const [kind, peerId] = splitCallKey(key);
             const stream = state.localStreams.get(kind);
-            if (stream && state.dataConnections.has(peerId)) routeLocalStream(kind, stream, true);
+            if (stream && state.dataConnections.has(peerId)) routeLocalStream(kind, stream, false);
         }
 
         for (const [key, call] of [...state.forwardedOutboundCalls]) {
